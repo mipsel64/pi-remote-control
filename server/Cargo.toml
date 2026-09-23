@@ -10,9 +10,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 include_dir = "0.7"
 url = "2"
-rand = "0.9"
-base64 = "0.22"
-sha2 = "0.10"
+rand = "0.10"
+base64 = "0.23"
+sha2 = "0.11"
 subtle = "2"
 uuid = { version = "1", features = ["v4"] }
 libc = "0.2"
@@ -25,6 +25,6 @@ libz-sys = { version = "1", features = ["static"] }
 clap = { version = "4.6.7", features = ["derive"] }
 
 [dev-dependencies]
-tokio-tungstenite = "0.28"
-reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.29"
+reqwest = { version = "0.13", features = ["json"] }
 tempfile = "3"
