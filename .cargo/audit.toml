@@ -1,0 +1,3 @@
+[advisories]
+# rsa is only reachable through web-push -> jwt-simple (pure-rust) -> superboring; VAPID signs with ES256, so prc never performs RSA operations.
+ignore = ["RUSTSEC-2023-0071"]
