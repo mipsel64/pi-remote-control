@@ -1,0 +1,34 @@
+{
+  "name": "pi-prc",
+  "version": "0.1.0",
+  "description": "Pi extension that attaches running Pi sessions to Pi Remote Control (prc).",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mipsel64/pi-remote-control.git"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions/remote-control.ts"
+  ],
+  "scripts": {
+    "test": "node --test test/extension.test.js",
+    "prepublishOnly": "npm test"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/remote-control.ts"
+    ]
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}

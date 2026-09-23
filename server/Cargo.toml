@@ -1,0 +1,30 @@
+[package]
+name = "prc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+include_dir = "0.7"
+url = "2"
+rand = "0.9"
+base64 = "0.22"
+sha2 = "0.10"
+subtle = "2"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+urlencoding = "2"
+futures-util = "0.3"
+web-push = "0.11"
+openssl = { version = "0.10", features = ["vendored"] }
+# Static zlib keeps release binaries and the distroless image dependent only on glibc.
+libz-sys = { version = "1", features = ["static"] }
+clap = { version = "4.6.7", features = ["derive"] }
+
+[dev-dependencies]
+tokio-tungstenite = "0.28"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"

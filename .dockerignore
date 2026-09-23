@@ -1,0 +1,17 @@
+**
+!Dockerfile
+!LICENSE
+!server/Cargo.toml
+!server/Cargo.lock
+!server/build.rs
+!server/src/
+!server/src/**
+!server/web/package.json
+!server/web/package-lock.json
+!server/web/index.html
+!server/web/public/
+!server/web/public/**
+!server/web/scripts/
+!server/web/scripts/**
+!server/web/src/
+!server/web/src/**

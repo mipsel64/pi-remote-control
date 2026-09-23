@@ -1,0 +1,184 @@
+name: Release
+run-name: Release ${{ github.ref_name }}
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RUSTUP_TOOLCHAIN: '1.96'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release version
+        run: |
+          npm_version=$(node -p "require('./package.json').version")
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' server/Cargo.toml | head -1)
+          if [ "$GITHUB_REF_NAME" != "v$npm_version" ] || [ "$GITHUB_REF_NAME" != "v$cargo_version" ]; then
+            echo "Tag must match package.json (v$npm_version) and server/Cargo.toml (v$cargo_version)" >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: server/web/package-lock.json
+      - run: npm ci --prefix server/web
+      - run: npm --prefix server/web test
+      # Build the UI once so every binary embeds identical assets.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: web-dist
+          path: server/web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  server:
+    name: Server (${{ matrix.platform }})
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc 2.35+; musl would need static curl/OpenSSL for web push.
+          - platform: linux-amd64
+            runner: ubuntu-22.04
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+          - platform: darwin-amd64
+            runner: macos-15-intel
+          - platform: darwin-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: web-dist
+          path: server/web/dist
+      - name: Install Rust
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Test
+        run: cargo test --manifest-path server/Cargo.toml --locked --all-targets
+      - name: Build
+        run: |
+          export GIT_SHA="$GITHUB_SHA"
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          export BUILD_DATE
+          cargo build --manifest-path server/Cargo.toml --locked --release
+          test "$(server/target/release/prc --version)" = "prc ${GITHUB_REF_NAME#v}+${GIT_SHA:0:7} $BUILD_DATE"
+      - name: Package
+        run: |
+          archive="prc-$GITHUB_REF_NAME-$PLATFORM.tar.gz"
+          stage="$RUNNER_TEMP/prc-$PLATFORM"
+          mkdir -p "$stage"
+          cp server/target/release/prc LICENSE README.md "$stage/"
+          cp -R examples "$stage/"
+          COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" prc LICENSE README.md examples
+          shasum -a 256 "$archive" > "$archive.sha256"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prc-${{ matrix.platform }}
+          path: |
+            prc-*.tar.gz
+            prc-*.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+  docker:
+    needs: server
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      publish: true
+
+  npm:
+    needs: server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm ci
+      - name: Publish extension
+        run: |
+          spec="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          # Trusted publishing needs an existing package, so the first version may be published by hand.
+          if npm view "$spec" version >/dev/null 2>&1; then
+            echo "$spec is already on npm"
+          elif [[ "${spec##*@}" == *-* ]]; then
+            npm publish --tag next
+          else
+            npm publish
+          fi
+
+  release:
+    needs: [server, docker, npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: prc-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums
+        working-directory: dist
+        run: |
+          cat ./*.sha256 | sort -k2 > checksums.txt
+          sha256sum --check checksums.txt
+      - name: Release metadata
+        id: release
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "${TAG%%+*}" == *-* ]]; then
+            echo 'prerelease=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'prerelease=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          tag_name: ${{ github.ref_name }}
+          prerelease: ${{ steps.release.outputs.prerelease == 'true' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt

@@ -1,0 +1,5 @@
+node_modules/
+server/web/node_modules/
+server/web/dist/
+server/target/
+.pi/tasks/

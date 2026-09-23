@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.github.mipsel64.pi-remote-control</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/prc</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/ABSOLUTE/PATH/TO/HOME</string>
+    <key>XDG_CONFIG_HOME</key><string>/ABSOLUTE/PATH/TO/HOME/.config</string>
+    <key>XDG_STATE_HOME</key><string>/ABSOLUTE/PATH/TO/HOME/.local/state</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/pi-remote-control/stdout.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/TO/HOME/Library/Logs/pi-remote-control/stderr.log</string>
+</dict>
+</plist>

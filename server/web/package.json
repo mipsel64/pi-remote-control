@@ -1,0 +1,22 @@
+{
+  "name": "pi-remote-control-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build && node scripts/precache.mjs",
+    "test": "npm run build && node --test test/*.test.js"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "vite": "^7.1.7"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

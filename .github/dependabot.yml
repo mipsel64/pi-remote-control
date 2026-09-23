@@ -1,0 +1,57 @@
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:17'
+      timezone: Etc/UTC
+    groups:
+      dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: npm
+    directory: /server/web
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:19'
+      timezone: Etc/UTC
+    groups:
+      web:
+        patterns: ['*']
+
+  - package-ecosystem: cargo
+    directory: /server
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:21'
+      timezone: Etc/UTC
+    groups:
+      cargo:
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:23'
+      timezone: Etc/UTC
+    groups:
+      actions:
+        patterns: ['*']
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '03:25'
+      timezone: Etc/UTC
+    groups:
+      docker:
+        patterns: ['*']
