@@ -1,11 +1,11 @@
-FROM node:22-bookworm-slim AS web
+FROM node:25-bookworm-slim AS web
 WORKDIR /web
 COPY server/web/package.json server/web/package-lock.json ./
 RUN npm ci
 COPY server/web/ ./
 RUN npm run build
 
-FROM rust:1.96-bookworm AS build
+FROM rust:1.98-bookworm AS build
 WORKDIR /build
 COPY server/Cargo.toml server/Cargo.lock server/build.rs ./
 COPY server/src ./src
