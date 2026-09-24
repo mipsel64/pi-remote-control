@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { buildAsset, choose, contentText, unchoose, currentSession, initialHistory, needsHomeScreen, receive, selectSession, sessionStatus, settledNotice, swipeAction } from './history.js';
+import { buildAsset, choose, contentText, unchoose, currentSession, initialHistory, needsHomeScreen, receive, selectSession, sessionStatus, settledNotice, swipeAction, appHeight } from './history.js';
 import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import './style.css';
@@ -17,6 +17,9 @@ const Icon = ({ children, className }) => <svg className={className} viewBox="0 
 const Chevron = () => <Icon className="chevron"><path d="m9 18 6-6-6-6" /></Icon>;
 const Brain = () => <Icon><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /><path d="M12 5v13" /></Icon>;
 const Down = () => <Icon><path d="m6 9 6 6 6-6" /></Icon>;
+const Bell = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" /></Icon>;
+const BellOff = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742" /><path d="m2 2 20 20" /><path d="M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05" /></Icon>;
+const Remove = () => <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>;
 const Pencil = () => <Icon><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></Icon>;
 const statusIcons = {
   done: <Icon><path d="M20 6 9 17l-5-5" /></Icon>,
@@ -170,6 +173,8 @@ function App() {
   const [subscribed, setSubscribed] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
   const [inPage, setInPage] = useState(() => canNotify && localStorage.getItem(IN_PAGE_KEY) === '1');
+  const notifyOn = subscribed || inPage;
+  const removing = useRef(null);
   const notifying = useRef(null);
   notifying.current = { inPage, subscribed };
   const wanted = useRef(new URLSearchParams(location.search).get('session'));
@@ -245,6 +250,28 @@ function App() {
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
+  }, []);
+  // The focused x button unmounts with its row; keep keyboard and screen-reader users in the list.
+  useEffect(() => {
+    const pending = removing.current;
+    if (!pending || history.sessions.some(item => item.processId === pending.processId)) return;
+    removing.current = null;
+    const next = pending.next && sidebar.current?.querySelector(`[data-process="${CSS.escape(pending.next)}"]`);
+    (next || sidebar.current?.querySelector('#sessions button') || menu.current)?.focus();
+  }, [history.sessions]);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => {
+      const height = appHeight(vv);
+      if (height) document.documentElement.style.setProperty('--app-height', height);
+      // iOS scrolls the page to reveal a focused field and can leave it scrolled, stranding the composer mid-screen.
+      if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
+    };
+    update();
+    vv.addEventListener('resize', update);
+    vv.addEventListener('scroll', update);
+    return () => { vv.removeEventListener('resize', update); vv.removeEventListener('scroll', update); };
   }, []);
   useEffect(() => {
     const phone = matchMedia('(max-width: 759px)');
@@ -427,6 +454,16 @@ function App() {
   }
   const changeModel = value => sendChoice({ type: 'set_model', ...splitModelKey(value) }, { model: value });
   const changeThinking = level => sendChoice({ type: 'set_thinking', level }, { thinkingLevel: level });
+  function removeSession(session) {
+    const name = (history.optimistic[session.processId]?.name ?? session.name) || 'Pi';
+    if (!confirm(`Remove "${name}" from the list? Its saved conversation copy on this server is deleted. Pi's own session is not affected.`)) return;
+    if (socket.current?.readyState !== WebSocket.OPEN) return;
+    const list = data.current.sessions;
+    const index = list.findIndex(item => item.processId === session.processId);
+    removing.current = { processId: session.processId, next: (list[index + 1] ?? list[index - 1])?.processId };
+    socket.current.send(JSON.stringify({ type: 'remove', processId: session.processId }));
+  }
+
   async function toggleNotifications() {
     setPushBusy(true);
     try {
@@ -482,16 +519,19 @@ function App() {
       <nav id="sessions">
         {history.sessions.map(session => {
           const state = sessionStatus(session);
-          return <button key={session.processId} type="button" className="thread-item" title={session.cwd} aria-current={session.processId === history.selected ? 'true' : undefined} onClick={() => select(session.processId)}>
-            <span className={`dot ${state}`} aria-hidden="true" /><span className="thread-item-title">{(history.optimistic[session.processId]?.name ?? session.name) || 'Pi'}</span>
-            <span className="thread-item-time">{relativeTime(session.updatedAt, now)}</span>
-            <span className="sr-only">, {state}</span>
-          </button>;
+          const name = (history.optimistic[session.processId]?.name ?? session.name) || 'Pi';
+          return <div key={session.processId} className="thread-row">
+            <button type="button" className="thread-item" data-process={session.processId} title={session.cwd} aria-current={session.processId === history.selected ? 'true' : undefined} onClick={() => select(session.processId)}>
+              <span className={`dot ${state}`} aria-hidden="true" /><span className="thread-item-title">{name}</span>
+              <span className="thread-item-time">{relativeTime(session.updatedAt, now)}</span>
+              <span className="sr-only">, {state}</span>
+            </button>
+            {!session.online && socketOpen && <button type="button" className="icon-button thread-remove" aria-label={`Remove ${name}`} title="Remove offline session"
+              onClick={() => removeSession(session)}><Remove /></button>}
+          </div>;
         })}
         {!history.sessions.length && <p className="sidebar-empty">Connected Pi sessions appear here.</p>}
       </nav>
-      {canNotify && <div className="sidebar-footer"><button id="push" type="button" disabled={pushBusy} onClick={toggleNotifications}>{subscribed || inPage ? 'Disable notifications' : 'Enable notifications'}</button>
-</div>}
       {homeScreenHint && <div className="sidebar-footer"><p className="sidebar-hint">For notifications on iPhone or iPad: tap Share, then Add to Home Screen, and open Pi Remote Control from the Home Screen.</p></div>}
     </aside>
     {drawer && <div className="backdrop" onClick={closeDrawer} />}
@@ -506,6 +546,8 @@ function App() {
             {active && <button ref={pencil} type="button" className="icon-button" aria-label="Rename session" onClick={startRename}><Pencil /></button>}</>}</div>
         {item && <span className={`badge ${sessionStatus(item)}`}><span className={`dot ${sessionStatus(item)}`} aria-hidden="true" />{sessionStatus(item)}</span>}
         <span id="status" role="status" title={status}>{status}</span>
+        {canNotify && <button type="button" className={`icon-button notify-toggle${notifyOn ? ' on' : ''}`} aria-pressed={notifyOn} disabled={pushBusy}
+          aria-label="Notifications" title={notifyOn ? 'Notifications on' : 'Notifications off'} onClick={toggleNotifications}>{notifyOn ? <Bell /> : <BellOff />}</button>}
       </header>
       <div id="history" ref={log} role="log" aria-live="polite" aria-relevant="additions" onScroll={event => {
         const node = event.currentTarget;

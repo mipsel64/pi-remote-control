@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { buildAsset, choose, contentText, initialHistory, needsHomeScreen, receive, sessionStatus, settledNotice, swipeAction, unchoose } from '../src/history.js';
+import { buildAsset, choose, contentText, initialHistory, needsHomeScreen, receive, sessionStatus, settledNotice, swipeAction, unchoose, appHeight } from '../src/history.js';
 
 const session = (sessionId = 's1', connectionId = 'c1', online = true) =>
   ({ processId: 'p1', sessionId, connectionId, name: 'Pi', cwd: '/tmp', online, busy: false });
@@ -347,4 +347,10 @@ test('swipeAction opens the drawer on a right swipe and closes it on a left swip
   assert.equal(swipe(-80, 10, false), null);
   assert.equal(swipe(40, 0, false), null);
   assert.equal(swipe(80, 60, false), null);
+});
+
+test('appHeight follows the area above the keyboard and ignores pinch-zoom', () => {
+  assert.equal(appHeight({ height: 844, scale: 1 }), '844px');
+  assert.equal(appHeight({ height: 503.6, scale: 1 }), '504px');
+  assert.equal(appHeight({ height: 400, scale: 2 }), null);
 });
