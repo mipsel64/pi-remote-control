@@ -553,7 +553,7 @@ fn generated_vapid_keys_are_private_reused_and_sign_payloads() {
     let mut signature = VapidSignatureBuilder::from_base64(&push.private, &info).unwrap();
     signature.add_claim("sub", push.subject);
     let mut message = WebPushMessageBuilder::new(&info);
-    let payload = push_payload("Pi", "p", "s");
+    let payload = push_payload("Pi", "p", "s", "Finished responding");
     message.set_payload(ContentEncoding::Aes128Gcm, &payload);
     message.set_vapid_signature(signature.build().unwrap());
     assert!(message.build().is_ok());
@@ -573,13 +573,44 @@ fn generated_vapid_keys_are_private_reused_and_sign_payloads() {
 
 #[test]
 fn push_payload_names_the_finished_session() {
-    let payload =
-        |name: &str| serde_json::from_slice::<Value>(&push_payload(name, "p", "s")).unwrap();
+    let payload = |name: &str| {
+        serde_json::from_slice::<Value>(&push_payload(name, "p", "s", "Done")).unwrap()
+    };
     assert_eq!(
         payload("Fix the build"),
-        json!({"title":"Fix the build","body":"Finished responding","processId":"p","sessionId":"s"})
+        json!({"title":"Fix the build","body":"Done","processId":"p","sessionId":"s"})
     );
-    assert_eq!(payload("  ")["title"], "Pi");
+    let body = |event: Value| notice_body(&event);
+    assert_eq!(
+        body(json!({"type":"agent_settled"})).unwrap(),
+        "Finished responding"
+    );
+    assert_eq!(
+        body(json!({"type":"ui_prompt_start","kind":"confirm"})).unwrap(),
+        "Needs your input"
+    );
+    assert_eq!(
+        body(json!({"type":"ui_prompt_start","title":" Allow rm? "})).unwrap(),
+        "Needs your input: Allow rm?"
+    );
+    assert_eq!(
+        body(json!({"type":"ui_prompt_start","title":"x".repeat(200)}))
+            .unwrap()
+            .len(),
+        18 + 120
+    );
+    assert_eq!(body(json!({"type":"ui_prompt_end"})), None);
+    assert_eq!(
+        body(json!({"type":"agent_settled","summary":" Should I ship it? "})).unwrap(),
+        "Should I ship it?"
+    );
+    assert_eq!(
+        body(json!({"type":"agent_settled","summary":"z".repeat(300)}))
+            .unwrap()
+            .len(),
+        200
+    );
+    assert_eq!(payload("  ")["title"], "New Session");
     assert_eq!(payload(&"é".repeat(81))["title"], "é".repeat(80));
 }
 
@@ -677,7 +708,7 @@ fn attach(app: &App, process: &str, session: &str, updated_at: u64) -> (Uuid, Se
         id,
         &tx,
         &mut None,
-        &json!({"type":"hello","processId":process,"sessionId":session,"name":"Pi","cwd":"/tmp","busy":false,"updatedAt":updated_at})
+        &json!({"type":"hello","processId":process,"sessionId":session,"name":"Pi","cwd":"/tmp","branch":"main","busy":false,"updatedAt":updated_at})
     ));
     (id, tx)
 }
@@ -710,6 +741,46 @@ fn mode(path: &Path) -> u32 {
 }
 
 #[test]
+fn ui_prompt_events_mark_session_waiting() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let waiting = || app.inner.lock().unwrap().sessions["p"].info("p")["waiting"].clone();
+    assert_eq!(waiting(), false);
+    for (kind, expected) in [
+        ("ui_prompt_start", true),
+        ("ui_prompt_end", false),
+        ("ui_prompt_start", true),
+    ] {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":kind,"reason":"ui_prompt","kind":"confirm"}})
+        ));
+        assert_eq!(waiting(), expected);
+    }
+    let event = |event: Value| {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":event})
+        ));
+        waiting()
+    };
+    assert_eq!(event(json!({"type":"ui_prompt_end"})), false);
+    assert_eq!(event(json!({"type":"agent_settled","asking":true})), true);
+    assert_eq!(event(json!({"type":"agent_start"})), false);
+    assert_eq!(event(json!({"type":"agent_settled","asking":"yes"})), false);
+    assert_eq!(event(json!({"type":"agent_settled","asking":true})), true);
+    go_offline(&app, "p");
+    assert_eq!(waiting(), false);
+}
+
+#[test]
 fn offline_snapshot_survives_restart_and_replays_on_select() {
     let state = tempfile::tempdir().unwrap();
     let app = App::new(state_settings(state.path()));
@@ -738,6 +809,7 @@ fn offline_snapshot_survives_restart_and_replays_on_select() {
     assert_eq!(listed["online"], false);
     assert_eq!(listed["busy"], false);
     assert_eq!(listed["name"], "Pi");
+    assert_eq!(listed["branch"], "main");
     assert_eq!(listed["updatedAt"], 1234);
     assert_eq!(parse(select(&app, "p")), vec![expected]);
     let (btx, mut brx) = mpsc::unbounded_channel();
@@ -986,6 +1058,7 @@ fn retention_keeps_fifty_sessions_and_never_prunes_online() {
         session_id: "x".into(),
         name: String::new(),
         cwd: String::new(),
+        branch: None,
         updated_at: 0,
         model: None,
         thinking_level: None,
@@ -1020,13 +1093,14 @@ fn model_fields_persist_and_model_commands_are_validated() {
         id,
         &tx,
         &mut None,
-        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false,"model":model,"thinkingLevel":"high","models":[models[0], {"provider":"bad"}, models[1]]})
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","branch":"","busy":false,"model":model,"thinkingLevel":"high","models":[models[0], {"provider":"bad"}, models[1]]})
     ));
     agent.try_recv().unwrap();
     other_rx.try_recv().unwrap();
     let listed = app.inner.lock().unwrap().sessions["p"].info("p");
     assert_eq!(listed["model"], model);
     assert_eq!(listed["thinkingLevel"], "high");
+    assert_eq!(listed["branch"], Value::Null);
     assert!(listed.get("models").is_none());
 
     let (btx, mut brx) = mpsc::unbounded_channel();

@@ -10,16 +10,29 @@ export function contentText(content) {
 }
 
 export const initialHistory = { sessions: [], selected: null, entries: [], stream: null, pending: null, awaiting: false, lastEndedAt: null, models: {}, optimistic: {} };
+export const DEFAULT_NAME = 'New Session';
+export const folderName = cwd => String(cwd ?? '').split(/[\\/]/).filter(Boolean).pop() || cwd || '';
+export const pinFirst = (sessions, pinned) => [...sessions.filter(item => pinned.includes(item.sessionId)), ...sessions.filter(item => !pinned.includes(item.sessionId))];
 export const currentSession = state => state.sessions.find(item => item.processId === state.selected);
-export const sessionStatus = session => !session.online ? 'offline' : session.busy ? 'busy' : 'idle';
+export const sessionStatus = session => !session.online ? 'offline' : session.waiting ? 'waiting' : session.busy ? 'busy' : 'idle';
+export const statusLabel = { idle: 'Idle', busy: 'Busy', offline: 'Offline', waiting: 'Needs input', connecting: 'Connecting…' };
 export const buildAsset = html => /src="(\/assets\/index-[^"]+\.js)"/.exec(String(html ?? ''))?.[1] ?? null;
 
-// In-page fallback for a finished prompt; callers pass enabled=false while a push subscription covers it.
-export function settledNotice(message, { enabled, hidden, selected, sessions }) {
-  if (!enabled || message.type !== 'event' || message.event?.type !== 'agent_settled') return null;
-  if (!hidden && message.processId === selected) return null;
+// Mirrors the server's push body.
+function noticeBody(event) {
+  const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
+  if (event?.type === 'agent_settled') return text(event.summary, 200) || 'Finished responding';
+  if (event?.type !== 'ui_prompt_start') return null;
+  const title = text(event.title, 120);
+  return title ? `Needs your input: ${title}` : 'Needs your input';
+}
+
+// In-page fallback for a finished prompt or a waiting dialog; callers pass enabled=false while a push subscription covers it.
+export function sessionNotice(message, { enabled, hidden, selected, sessions }) {
+  const body = message.type === 'event' ? noticeBody(message.event) : null;
+  if (!enabled || !body || (!hidden && message.processId === selected)) return null;
   const session = sessions.find(item => item.processId === message.processId);
-  return session ? { title: (session.name || 'Pi').slice(0, 80), body: 'Finished responding', tag: session.processId } : null;
+  return session ? { title: (session.name || DEFAULT_NAME).slice(0, 80), body, tag: session.processId } : null;
 }
 
 // iOS only exposes notifications to web apps opened from the Home Screen (iPadOS reports a Mac user agent).

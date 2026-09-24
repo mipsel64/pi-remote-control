@@ -1,6 +1,6 @@
 # Pi Remote Control
 
-Control your **already-running** [Pi](https://pi.dev) sessions from a phone or browser: live output, send prompts, stop runs, switch models, and get a notification when a prompt finishes.
+Control your **already-running** [Pi](https://pi.dev) sessions from a phone or browser: live output, send prompts, stop runs, switch models, and get a notification when a prompt finishes or Pi needs your input.
 
 It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`@mipsel64/pi-remote-control` Pi extension**, which attaches a Pi session when you run `/rc`.
 
@@ -101,7 +101,7 @@ Both fields are optional. `url` must end in `/agent` and use `wss://`; `ws://` i
 | `PI_RC_URL` + `PI_RC_AGENT_TOKEN` | extension | Set both to replace `client.json`. |
 | `RC_CONFIG` | both | Use a different `config.json` path. `client.json` is read from the same directory. |
 
-The server stores the latest transcript of the 50 most recent sessions, plus its push keys and subscriptions, in `~/.local/state/prc` (`$XDG_STATE_HOME/prc`). Offline sessions stay readable; remove one with the **×** on its row in the session list. To clear everything, stop `prc` and delete that directory.
+The server stores the latest transcript of the 50 most recent sessions, plus its push keys and subscriptions, in `~/.local/state/prc` (`$XDG_STATE_HOME/prc`). Offline sessions stay readable; remove one with **Remove** in its **⋯** menu in the session list. To clear everything, stop `prc` and delete that directory.
 
 ## Run as a service
 
@@ -133,7 +133,7 @@ Tags: `vX.Y.Z`, `latest` (stable releases), and `nightly` (`main`). Keep the `pr
 
 ## Notifications
 
-Tap the **bell** in the top-right corner to be notified whenever a prompt finishes (a crossed-out bell means off). Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. Notifications show the session name, never the transcript.
+Tap the **bell** in the top-right corner to be notified whenever a prompt finishes or Pi is waiting on a dialog (a crossed-out bell means off). Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. A notification's title is the session name; its text is a short excerpt of the final reply (its closing question, if it asks one) or the waiting dialog's title. Web Push payloads are encrypted end to end, but the excerpt can show on a locked screen; hide previews in your phone's notification settings if that matters.
 
 ## Development
 
