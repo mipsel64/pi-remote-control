@@ -2,7 +2,7 @@
 
 Control your **already-running** [Pi](https://pi.dev) sessions from a phone or browser: live output, send prompts, stop runs, switch models, and get a notification when a prompt finishes.
 
-It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`pi-prc` extension**, which attaches a Pi session when you run `/rc`.
+It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`@mipsel64/pi-remote-control` Pi extension**, which attaches a Pi session when you run `/rc`.
 
 > Remote prompts run tools with your user's permissions. Treat access like SSH: keep the server on localhost or your private Tailscale network.
 
@@ -28,7 +28,7 @@ prc serve    # http://127.0.0.1:8787
 **3. Attach Pi.** Install the extension, then run `/rc` inside any Pi session you want to control:
 
 ```sh
-pi install npm:pi-prc
+pi install npm:@mipsel64/pi-remote-control
 ```
 
 Open http://localhost:8787, sign in with the admin password, and pick the session.
@@ -145,6 +145,6 @@ make build                                             # server/target/release/p
 make serve REBUILD=1                                   # build and run in the foreground
 ```
 
-To release, set the same version in `package.json` and `server/Cargo.toml`, update both lockfiles, merge, and push a `vX.Y.Z` tag. CI then builds the binaries, the GHCR image, the npm package, and the GitHub release; tags such as `v1.0.0-rc.1` become prereleases. Before the first release, publish `pi-prc` once by hand and add npm trusted publishing for `release.yml`.
+To release, set the same version in `package.json` and `server/Cargo.toml`, update both lockfiles, merge, and push a `vX.Y.Z` tag. CI then builds the binaries, the GHCR image, the npm package, and the GitHub release; tags such as `v1.0.0-rc.1` become prereleases. Before the first release, create the free npm organization `mipsel64` (it owns the `@mipsel64` scope), publish `@mipsel64/pi-remote-control` once by hand (`npm publish --access public`), and add npm trusted publishing for `release.yml`.
 
 Protocol and security details are in [DESIGN.md](DESIGN.md).
