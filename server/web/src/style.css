@@ -17,7 +17,7 @@
 * { box-sizing: border-box; }
 html, body { height: 100%; overflow: hidden; overscroll-behavior: none; }
 body { margin: 0; }
-#root { position: fixed; top: var(--app-top, 0px); left: 0; right: 0; display: flex; flex-direction: column; height: 100vh; height: var(--app-height, 100dvh); overflow-y: auto; }
+#root { position: fixed; inset: 0 0 auto; display: flex; flex-direction: column; height: 100vh; height: var(--app-height, 100dvh); overflow: hidden; }
 h1, h2, p { margin: 0; }
 button, textarea, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
@@ -29,7 +29,7 @@ summary:focus-visible { outline-offset: 0; border-radius: .375rem; }
 .brand h1 { font-size: .875rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .logo { display: grid; place-items: center; flex: none; width: 2rem; height: 2rem; border-radius: .5rem; background: var(--foreground); color: var(--background); font-weight: 700; font-size: 1.1rem; }
 
-#login { margin: auto; width: min(100%, 24rem); padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom)); }
+#login { margin: auto; width: min(100%, 24rem); max-height: 100%; overflow-y: auto; overscroll-behavior: contain; padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom)); }
 #login-form { display: grid; gap: .875rem; padding: 1.5rem; border: 1px solid var(--border); border-radius: .75rem; }
 #login-form h2 { font-size: 1.25rem; font-weight: 600; margin-top: .5rem; }
 #login-form p { color: var(--muted-foreground); font-size: .875rem; }
@@ -74,7 +74,7 @@ summary:focus-visible { outline-offset: 0; border-radius: .375rem; }
 .notify-toggle { color: var(--muted-foreground); }
 .notify-toggle.on { color: var(--foreground); }
 
-#history { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; }
+#history { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
 .thread { display: flex; flex-direction: column; gap: 1.5rem; width: 100%; max-width: 44rem; min-height: 100%; margin: 0 auto; padding: 1.5rem 1rem 1rem; }
 .thread > * { min-width: 0; }
 .notice { padding: .5rem .75rem; border-radius: .5rem; background: var(--muted); color: var(--muted-foreground); font-size: .8125rem; text-align: center; }

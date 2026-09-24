@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { buildAsset, choose, contentText, unchoose, currentSession, initialHistory, needsHomeScreen, receive, selectSession, sessionStatus, settledNotice, swipeAction, viewportBox } from './history.js';
+import { buildAsset, choose, contentText, unchoose, currentSession, initialHistory, needsHomeScreen, receive, selectSession, sessionStatus, settledNotice, swipeAction, appHeight } from './history.js';
 import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import './style.css';
@@ -263,12 +263,10 @@ function App() {
     const vv = window.visualViewport;
     if (!vv) return;
     const update = () => {
-      const box = viewportBox(vv);
-      if (!box) return;
-      document.documentElement.style.setProperty('--app-height', box.height);
-      document.documentElement.style.setProperty('--app-top', box.top);
-      // iOS can leave the document scrolled after the keyboard closes, stranding the composer mid-screen.
-      if (window.scrollY) window.scrollTo(0, 0);
+      const height = appHeight(vv);
+      if (height) document.documentElement.style.setProperty('--app-height', height);
+      // iOS scrolls the page to reveal a focused field and can leave it scrolled, stranding the composer mid-screen.
+      if (window.scrollY || vv.offsetTop) window.scrollTo(0, 0);
     };
     update();
     vv.addEventListener('resize', update);

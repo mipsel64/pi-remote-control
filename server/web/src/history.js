@@ -35,10 +35,8 @@ export function swipeAction({ startX, startY, endX, endY, open, distance = 60 })
   return !open && dx > 0 ? 'open' : open && dx < 0 ? 'close' : null;
 }
 
-// Size the app to the visible area so the on-screen keyboard cannot push the composer off its pinned spot; ignore pinch-zoom.
-export function viewportBox({ height, offsetTop, scale }) {
-  return Math.abs(scale - 1) > 0.01 ? null : { height: `${Math.round(height)}px`, top: `${Math.max(0, Math.round(offsetTop))}px` };
-}
+// Height of the area above the on-screen keyboard, so the app never extends under it; ignore pinch-zoom.
+export const appHeight = ({ height, scale }) => Math.abs(scale - 1) > 0.01 ? null : `${Math.round(height)}px`;
 
 export function selectSession(state, processId) {
   return state.selected === processId ? state : { ...state, selected: processId, entries: [], stream: null, pending: null, awaiting: true, lastEndedAt: null };
