@@ -44,7 +44,7 @@ tailscale serve status    # shows https://<machine>.<tailnet>.ts.net
 
 Set `publicOrigin` in `~/.config/prc/config.json` to that exact address (no trailing slash), restart `prc`, and open it on your phone. `http://localhost:8787` keeps working on the server itself.
 
-For notifications on iPhone, open the address in Safari, tap **Share → Add to Home Screen**, open the app from the new icon, and tap **Enable notifications** in the sidebar.
+For notifications on iPhone, open the address in Safari, tap **Share → Add to Home Screen**, open the app from the new icon, and tap the **bell** in the top-right corner.
 
 ## Pi commands
 
@@ -101,7 +101,7 @@ Both fields are optional. `url` must end in `/agent` and use `wss://`; `ws://` i
 | `PI_RC_URL` + `PI_RC_AGENT_TOKEN` | extension | Set both to replace `client.json`. |
 | `RC_CONFIG` | both | Use a different `config.json` path. `client.json` is read from the same directory. |
 
-The server stores the latest transcript of the 50 most recent sessions, plus its push keys and subscriptions, in `~/.local/state/prc` (`$XDG_STATE_HOME/prc`). Offline sessions stay readable. To clear everything, stop `prc` and delete that directory.
+The server stores the latest transcript of the 50 most recent sessions, plus its push keys and subscriptions, in `~/.local/state/prc` (`$XDG_STATE_HOME/prc`). Offline sessions stay readable; remove one with the **×** on its row in the session list. To clear everything, stop `prc` and delete that directory.
 
 ## Run as a service
 
@@ -133,7 +133,7 @@ Tags: `vX.Y.Z`, `latest` (stable releases), and `nightly` (`main`). Keep the `pr
 
 ## Notifications
 
-Tap **Enable notifications** in the sidebar to be notified whenever a prompt finishes. Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. Notifications show the session name, never the transcript.
+Tap the **bell** in the top-right corner to be notified whenever a prompt finishes (a crossed-out bell means off). Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. Notifications show the session name, never the transcript.
 
 ## Development
 

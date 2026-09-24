@@ -880,6 +880,54 @@ fn resumed_session_removes_stale_offline_process() {
 }
 
 #[test]
+fn browser_removes_only_offline_sessions_and_their_files() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    attach(&app, "gone", "s", 1);
+    go_offline(&app, "gone");
+    attach(&app, "live", "t", 1);
+    flush(&app);
+    let meta = state
+        .path()
+        .join("prc/sessions")
+        .join(format!("{}.json", file_stem("gone")));
+    assert!(meta.exists());
+    let (btx, mut brx) = mpsc::unbounded_channel();
+    app.inner
+        .lock()
+        .unwrap()
+        .browsers
+        .insert(Uuid::new_v4(), btx.clone());
+    let frame = |rx: &mut mpsc::UnboundedReceiver<Message>| -> Value {
+        serde_json::from_str(rx.try_recv().unwrap().to_text().unwrap()).unwrap()
+    };
+
+    browser_message(&app, &btx, &json!({"type":"remove","processId":"live"}));
+    assert_eq!(
+        frame(&mut brx),
+        json!({"type":"error","message":"Only offline sessions can be removed"})
+    );
+    assert!(app.inner.lock().unwrap().sessions.contains_key("live"));
+
+    browser_message(&app, &btx, &json!({"type":"remove","processId":"gone"}));
+    let listed = frame(&mut brx);
+    assert_eq!(listed["type"], "sessions");
+    assert!(listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["processId"] != "gone"));
+    flush(&app);
+    assert!(!meta.exists());
+    drop(app);
+    let app = App::new(state_settings(state.path()));
+    assert!(!app.inner.lock().unwrap().sessions.contains_key("gone"));
+
+    browser_message(&app, &btx, &json!({"type":"remove","processId":"gone"}));
+    assert!(brx.try_recv().is_err());
+}
+
+#[test]
 fn state_files_are_private() {
     let state = tempfile::tempdir().unwrap();
     let app = App::new(state_settings(state.path()));

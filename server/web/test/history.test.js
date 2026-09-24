@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { buildAsset, choose, contentText, initialHistory, needsHomeScreen, receive, sessionStatus, settledNotice, swipeAction, unchoose } from '../src/history.js';
+import { buildAsset, choose, contentText, initialHistory, needsHomeScreen, receive, sessionStatus, settledNotice, swipeAction, unchoose, viewportBox } from '../src/history.js';
 
 const session = (sessionId = 's1', connectionId = 'c1', online = true) =>
   ({ processId: 'p1', sessionId, connectionId, name: 'Pi', cwd: '/tmp', online, busy: false });
@@ -347,4 +347,11 @@ test('swipeAction opens the drawer on a right swipe and closes it on a left swip
   assert.equal(swipe(-80, 10, false), null);
   assert.equal(swipe(40, 0, false), null);
   assert.equal(swipe(80, 60, false), null);
+});
+
+test('viewportBox sizes the app to the visible area and ignores pinch-zoom', () => {
+  assert.deepEqual(viewportBox({ height: 844, offsetTop: 0, scale: 1 }), { height: '844px', top: '0px' });
+  assert.deepEqual(viewportBox({ height: 503.6, offsetTop: 280.2, scale: 1 }), { height: '504px', top: '280px' });
+  assert.deepEqual(viewportBox({ height: 500, offsetTop: -3, scale: 1 }), { height: '500px', top: '0px' });
+  assert.equal(viewportBox({ height: 400, offsetTop: 100, scale: 2 }), null);
 });

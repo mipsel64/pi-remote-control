@@ -1326,7 +1326,22 @@ fn browser_message(app: &App, tx: &Sender, v: &Value) {
         send(tx, json!({"type":"error","message":"Invalid command"}));
         return;
     };
-    let inner = app.inner.lock().unwrap();
+    let mut inner = app.inner.lock().unwrap();
+    if v["type"] == "remove" {
+        match inner.sessions.get(p).map(|s| s.tx.is_some()) {
+            Some(false) => {
+                inner.sessions.remove(p);
+                let _ = app.persist.send(Job::Remove(p.into()));
+                publish(&inner);
+            }
+            Some(true) => send(
+                tx,
+                json!({"type":"error","message":"Only offline sessions can be removed"}),
+            ),
+            None => {}
+        }
+        return;
+    }
     let Some(session) = inner.sessions.get(p) else {
         if v["type"] != "models" {
             send(tx, json!({"type":"error","message":"Process is offline"}));
