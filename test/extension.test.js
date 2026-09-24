@@ -4,6 +4,7 @@ const { once } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { WebSocketServer } = require('ws');
 
 const load = () => import('../extensions/remote-control.ts').then(module => module.default);
@@ -313,6 +314,8 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   assert.equal(hello.sessionId, 's1');
   assert.equal(hello.busy, false);
   assert.equal(hello.name, 'earlier');
+  assert.equal(hello.branch, null);
+  assert.equal(hello.waiting, false);
   assert.equal(hello.updatedAt, Date.parse(ctx.state.entries[0].timestamp));
   assert.deepEqual((await first.next(msg => msg.type === 'snapshot')).entries, ctx.state.entries);
   pi.setName('Named conversation');
@@ -329,6 +332,25 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   ctx.state.idle = false;
   pi.emit('agent_start', ctx);
   assert.deepEqual((await first.next(msg => msg.type === 'event')).event, { type: 'agent_start' });
+  const prompt = { type: 'ui_prompt_start', reason: 'ui_prompt', kind: 'confirm', title: 'Allow?' };
+  pi.emit('ui_prompt_start', ctx, prompt);
+  assert.deepEqual((await first.next(msg => msg.type === 'event')).event, prompt);
+  pi.emit('session_info_changed', ctx);
+  assert.equal((await first.next(msg => msg.type === 'hello')).waiting, true);
+  await first.next(msg => msg.type === 'snapshot');
+  pi.emit('ui_prompt_end', ctx, { ...prompt, type: 'ui_prompt_end' });
+  assert.equal((await first.next(msg => msg.type === 'event')).event.type, 'ui_prompt_end');
+  const saved = ctx.state.entries;
+  const settle = async text => {
+    ctx.state.entries = [...saved, { type: 'message', id: 'reply', message: { role: 'assistant', content: [{ type: 'text', text }] } }];
+    pi.emit('agent_settled', ctx);
+    return (await first.next(msg => msg.type === 'event' && msg.event.type === 'agent_settled')).event;
+  };
+  assert.deepEqual(await settle('## Done\n\nI updated **the** [server](http://x).\n\n```js\ncode?\n```\n\nShould I update `ui_prompt_start` docs?'),
+    { type: 'agent_settled', asking: true, summary: 'Should I update ui_prompt_start docs?' });
+  assert.deepEqual(await settle(`- All tests pass.\n\n${'x'.repeat(200)}`), { type: 'agent_settled', asking: false, summary: 'All tests pass.' });
+  assert.equal((await settle('y'.repeat(200))).summary, `${'y'.repeat(159)}…`);
+  ctx.state.entries = saved;
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'later' }));
   first.ws.send(JSON.stringify({ type: 'abort', sessionId: 's1' }));
   await until(() => pi.prompts.length === 2 && ctx.state.aborted === 1);
@@ -374,13 +396,20 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   const replacement = mockPi();
   const secondCtx = context('s2');
   secondCtx.state.entries = [];
+  secondCtx.cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-rc-git-'));
+  t.after(() => fs.rmSync(secondCtx.cwd, { recursive: true }));
+  execFileSync('git', ['init', '-q', '-b', 'feature'], { cwd: secondCtx.cwd });
   const second = await run(replacement, secondCtx);
   const freshHello = await second.next(msg => msg.type === 'hello');
   assert.notEqual(freshHello.processId, hello.processId);
-  assert.equal(freshHello.name, 'Pi');
+  assert.equal(freshHello.name, 'New Session');
+  assert.equal(freshHello.branch, 'feature');
   assert.equal((await second.next(msg => msg.type === 'snapshot')).sessionId, 's2');
   replacement.emit('message_end', secondCtx, { type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: '  Fix the\nlogin flow ' }] } });
   assert.equal((await second.next(msg => msg.type === 'hello')).name, 'Fix the login flow');
+  execFileSync('git', ['symbolic-ref', 'HEAD', 'refs/heads/other'], { cwd: secondCtx.cwd });
+  replacement.emit('agent_settled', secondCtx);
+  assert.equal((await second.next(msg => msg.type === 'hello')).branch, 'other');
   const closedAgain = once(second.ws, 'close');
   replacement.emit('session_shutdown', secondCtx);
   await closedAgain;

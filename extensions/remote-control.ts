@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -101,6 +102,26 @@ function advertisedModels(current: ExtensionContext) {
 const modelList = (current: ExtensionContext) =>
   advertisedModels(current).map(({ provider, id, name, reasoning }) => ({ provider, id, name, reasoning: Boolean(reasoning) }));
 
+// Null outside a repo or on a detached HEAD.
+function gitBranch(cwd: string) {
+  try { return execFileSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8', timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; }
+  catch { return null; }
+}
+
+// Notification text for the final reply: its closing question, else its opening paragraph.
+// ponytail: "ends with ?" is the whole question heuristic; misses "let me know…" phrasing.
+function lastReply(entries: ReturnType<ExtensionContext['sessionManager']['getBranch']>) {
+  const last = entries.findLast(entry => entry.type === 'message' && entry.message?.role === 'assistant');
+  const content = last?.type === 'message' ? last.message.content : undefined;
+  const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(part => part?.type === 'text').map(part => part.text).join('\n\n') : '';
+  const paragraphs = text.replace(/```[\s\S]*?```/g, '').split(/\n\s*\n/).map(paragraph => paragraph
+    .replace(/^\s*(#+|>|[-*+]|\d+\.)\s+/gm, '').replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[*`]/g, '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const closing = paragraphs.at(-1) ?? '';
+  const asking = closing.endsWith('?');
+  const summary = asking ? closing : paragraphs[0] ?? '';
+  return { asking, summary: summary.length > 160 ? `${summary.slice(0, 159)}…` : summary };
+}
+
 function saveClientUrl(url: string) {
   const { client } = configFiles();
   const existing = readPrivateConfig(client);
@@ -134,6 +155,10 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Announce only the connection a /rc command opens; automatic reconnects stay silent.
   let announce = false;
   let lastTitle = '';
+  let lastBranch: string | null = null;
+  // Tracked while disconnected too, so a reconnect during an open dialog still reports it.
+  let waiting = false;
+  let asking = false;
 
   function title(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
     const name = pi.getSessionName();
@@ -141,7 +166,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     const first = current.sessionManager.getBranch().find(entry => entry.type === 'message' && entry.message?.role === 'user');
     const content = first?.type === 'message' ? first.message.content : pending?.role === 'user' ? pending.content : undefined;
     const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(part => part?.type === 'text').map(part => part.text).join(' ') : '';
-    return text.replace(/\s+/g, ' ').trim().slice(0, 80) || 'Pi';
+    return text.replace(/\s+/g, ' ').trim().slice(0, 80) || 'New Session';
   }
 
   function status(current: ExtensionContext, state: 'connected' | 'connecting' | 'retrying' | 'off') {
@@ -265,8 +290,9 @@ export default function remoteControl(pi: ExtensionAPI) {
     const updatedAt = entries.reduce((latest, entry) => entry.type === 'message' && entry.message && ['user', 'assistant'].includes(entry.message.role)
       ? Math.max(latest, Date.parse(entry.timestamp) || 0) : latest, 0);
     lastTitle = title(current, pending);
+    lastBranch = gitBranch(current.cwd);
     const model = current.model;
-    send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, busy: !current.isIdle(), updatedAt,
+    send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
@@ -341,11 +367,21 @@ export default function remoteControl(pi: ExtensionAPI) {
     });
   }
   pi.on('session_tree', (_event, current) => snapshot(current));
-  for (const type of ['message_start', 'message_update', 'message_end', 'agent_start', 'agent_settled'] as const) {
+  for (const type of ['message_start', 'message_update', 'message_end', 'agent_start', 'agent_settled', 'ui_prompt_start', 'ui_prompt_end'] as const) {
     pi.on(type, (event, current) => {
+      if (type === 'ui_prompt_start' || type === 'ui_prompt_end') waiting = type === 'ui_prompt_start';
+      if (type === 'agent_start') asking = false;
+      let payload: object = event;
+      if (type === 'agent_settled') {
+        const reply = lastReply(current.sessionManager.getBranch());
+        asking = reply.asking;
+        payload = { ...event, asking, ...(reply.summary ? { summary: reply.summary } : {}) };
+      }
       if (ctx && type === 'message_end' && socket?.readyState === WebSocket.OPEN && 'message' in event && title(current, event.message) !== lastTitle)
         hello(current, event.message);
-      send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event });
+      // Tools may switch branches during a run.
+      if (ctx && type === 'agent_settled' && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
+      send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
     });
   }
   pi.on('session_shutdown', stop);

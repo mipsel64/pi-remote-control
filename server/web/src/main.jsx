@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { buildAsset, choose, contentText, unchoose, currentSession, initialHistory, needsHomeScreen, receive, selectSession, sessionStatus, settledNotice, swipeAction, appHeight } from './history.js';
+import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
 import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import './style.css';
@@ -9,6 +9,7 @@ const canNotify = 'Notification' in window && window.isSecureContext;
 const pushCapable = location.protocol === 'https:' && 'serviceWorker' in navigator && 'PushManager' in window;
 const homeScreenHint = needsHomeScreen({ userAgent: navigator.userAgent, platform: navigator.platform, maxTouchPoints: navigator.maxTouchPoints, standalone: navigator.standalone, canNotify, secure: window.isSecureContext });
 const IN_PAGE_KEY = 'prc-notifications';
+const PIN_KEY = 'prc-pinned';
 // Older builds could save in-page mode on HTTPS, which shows "Disable" while nothing is subscribed.
 if (pushCapable) localStorage.removeItem(IN_PAGE_KEY);
 
@@ -19,7 +20,12 @@ const Brain = () => <Icon><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.7
 const Down = () => <Icon><path d="m6 9 6 6 6-6" /></Icon>;
 const Bell = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" /></Icon>;
 const BellOff = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742" /><path d="m2 2 20 20" /><path d="M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05" /></Icon>;
-const Remove = () => <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>;
+const More = () => <Icon><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></Icon>;
+const Pin = () => <Icon><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></Icon>;
+const Trash = () => <Icon><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></Icon>;
+const Folder = () => <Icon><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>;
+const Branch = () => <Icon><path d="M6 3v12" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></Icon>;
+const Alert = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" /></Icon>;
 const Pencil = () => <Icon><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></Icon>;
 const statusIcons = {
   done: <Icon><path d="M20 6 9 17l-5-5" /></Icon>,
@@ -164,8 +170,37 @@ function ModelMenu({ picker, enabled, onOpen, onModel, onThinking }) {
   </>;
 }
 
+function Location({ session }) {
+  return <span className="location" title={session.cwd}><Folder /><span className="location-text">{folderName(session.cwd)}</span>
+    {session.branch && <><Branch /><span className="location-text">{session.branch}</span></>}</span>;
+}
+
+function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' }) {
+  const id = useId();
+  const panel = useRef(null);
+  // Top-layer popover escapes the scrolling sidebar; align it to the trigger, kept on screen and flipped up near the bottom.
+  function place(event) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const { clientWidth, clientHeight } = document.documentElement;
+    const width = parseFloat(getComputedStyle(panel.current).width);
+    const up = rect.bottom > clientHeight * 0.6;
+    Object.assign(panel.current.style, { left: `${align === 'start' ? Math.min(rect.left, clientWidth - width - 8) : Math.max(8, rect.right - width)}px`,
+      top: up ? 'auto' : `${rect.bottom + 4}px`, bottom: up ? `${clientHeight - rect.top + 4}px` : 'auto' });
+  }
+  return <>
+    <button ref={buttonRef} type="button" className={`icon-button actions-trigger ${className}`} popoverTarget={id} aria-label={label} title="Session actions" onClick={place}><More /></button>
+    <div ref={panel} id={id} popover="auto" className="session-menu">
+      {actions.map(action => <button key={action.label} type="button" className={`menu-row${action.danger ? ' danger' : ''}`}
+        onClick={() => { panel.current.hidePopover(); action.run(); }}>{action.icon}<span className="menu-label">{action.label}</span></button>)}
+    </div>
+  </>;
+}
+
 function App() {
+  // Sign-in form messages only; the control view reports through toasts.
   const [status, setStatus] = useState('Connecting…');
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
   const [signedIn, setSignedIn] = useState(false);
   const [history, setHistory] = useState(initialHistory);
   const [text, setText] = useState('');
@@ -183,6 +218,9 @@ function App() {
   drawerOpen.current = drawer;
   const [atBottom, setAtBottom] = useState(true);
   const [editing, setEditing] = useState(null);
+  const [pinned, setPinned] = useState(() => {
+    try { const saved = JSON.parse(localStorage.getItem(PIN_KEY)); return Array.isArray(saved) ? saved : []; } catch { return []; }
+  });
   const shownCount = useRef(0);
   const [now, setNow] = useState(Date.now());
   const data = useRef(initialHistory);
@@ -193,10 +231,15 @@ function App() {
   const input = useRef(null);
   const menu = useRef(null);
   const sidebar = useRef(null);
-  const pencil = useRef(null);
+  const actionsButton = useRef(null);
   const renameDone = useRef(false);
 
   function publish(next) { data.current = next; setHistory(next); }
+  function notify(text, tone = 'success') {
+    clearTimeout(toastTimer.current);
+    setToast({ text, tone, id: Date.now() });
+    toastTimer.current = setTimeout(() => setToast(null), tone === 'error' ? 6000 : 2500);
+  }
   function usable() { return socket.current?.readyState === WebSocket.OPEN && currentSession(data.current)?.online; }
   function sendSelect(processId) {
     const session = data.current.sessions.find(item => item.processId === processId);
@@ -227,6 +270,7 @@ function App() {
   const busy = Boolean(active && item.busy);
   const items = buildThread(history.entries, history.stream);
   const title = history.optimistic[item?.processId]?.name ?? item?.name;
+  const badge = !socketOpen ? 'connecting' : item ? sessionStatus(item) : null;
   const renameKey = active ? `${item.processId}\u0000${item.sessionId}` : null;
   const renaming = editing !== null && editing === renameKey;
   const notice = !item ? history.sessions.length ? 'Select a session to view its conversation.' : 'No sessions yet. In Pi, run /rc to connect a session.' :
@@ -246,12 +290,12 @@ function App() {
     node.style.height = 'auto';
     node.style.height = `${Math.min(node.scrollHeight, 192)}px`;
   }, [text, signedIn]);
-  useEffect(() => setEditing(null), [renameKey]);
+  useEffect(() => setEditing(key => key === renameKey ? key : null), [renameKey]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
   }, []);
-  // The focused x button unmounts with its row; keep keyboard and screen-reader users in the list.
+  // The focused menu unmounts with its row; keep keyboard and screen-reader users in the list.
   useEffect(() => {
     const pending = removing.current;
     if (!pending || history.sessions.some(item => item.processId === pending.processId)) return;
@@ -327,12 +371,10 @@ function App() {
     }
     function connect() {
       if (!mounted || socket.current) return;
-      setStatus('Connecting…');
       const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ui`);
       socket.current = ws;
       ws.onopen = () => {
         if (!mounted) return;
-        setStatus('Connected');
         setSignedIn(true);
         setHistory({ ...data.current });
         if (data.current.selected) sendSelect(data.current.selected);
@@ -347,8 +389,8 @@ function App() {
       ws.onmessage = event => {
         try {
           const message = JSON.parse(event.data);
-          if (message.type === 'error') { setStatus(message.message || 'Command failed'); publish({ ...data.current, optimistic: {} }); return; }
-          const note = settledNotice(message, { enabled: notifying.current.inPage && !notifying.current.subscribed && Notification.permission === 'granted',
+          if (message.type === 'error') { notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
+          const note = sessionNotice(message, { enabled: notifying.current.inPage && !notifying.current.subscribed && Notification.permission === 'granted',
             hidden: document.hidden, selected: data.current.selected, sessions: data.current.sessions });
           const result = receive(data.current, message);
           publish(result.state);
@@ -357,12 +399,11 @@ function App() {
             window.history.replaceState(null, '', location.pathname);
           } else if (result.select) sendSelect(result.select);
           if (note) showNotice(note);
-        } catch { setStatus('Invalid server message'); }
+        } catch { notify('Invalid server message', 'error'); }
       };
       ws.onclose = async () => {
         if (!mounted || socket.current !== ws) return;
         socket.current = null;
-        setStatus('Reconnecting…');
         publish({ ...data.current, stream: null, pending: null, awaiting: true });
         try {
           const response = await fetch('/api/push-key', { cache: 'no-store' });
@@ -409,7 +450,7 @@ function App() {
   function prompt(event) {
     event.preventDefault();
     if (!usable() || !text.trim()) return;
-    if (new TextEncoder().encode(text).length > 16 * 1024) { setStatus('Message exceeds 16 KB'); return; }
+    if (new TextEncoder().encode(text).length > 16 * 1024) { notify('Message exceeds 16 KB', 'error'); return; }
     const current = currentSession(data.current);
     socket.current.send(JSON.stringify({ type: 'prompt', processId: current.processId, sessionId: current.sessionId, text }));
     setText('');
@@ -433,7 +474,28 @@ function App() {
     const pick = data.current.optimistic[current.processId];
     setTimeout(() => publish(unchoose(data.current, current.processId, pick)), 5000);
   }
-  function startRename() { renameDone.current = false; setEditing(renameKey); }
+  function startRename(session) {
+    if (session.processId !== data.current.selected) openSession(session.processId);
+    renameDone.current = false;
+    setEditing(`${session.processId}\u0000${session.sessionId}`);
+  }
+  async function copy(text, what) {
+    try { await navigator.clipboard.writeText(text); notify(`${what} copied`); }
+    catch { notify(`Could not copy ${what.toLowerCase()}`, 'error'); }
+  }
+  function togglePin(sessionId) {
+    const next = pinned.includes(sessionId) ? pinned.filter(id => id !== sessionId) : [...pinned, sessionId];
+    localStorage.setItem(PIN_KEY, JSON.stringify(next));
+    setPinned(next);
+  }
+  const displayName = session => (history.optimistic[session.processId]?.name ?? session.name) || DEFAULT_NAME;
+  const sessionActions = session => [
+    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
+    session.cwd && { label: 'Copy full path', icon: <Folder />, run: () => copy(session.cwd, 'Path') },
+    session.branch && { label: 'Copy current branch', icon: <Branch />, run: () => copy(session.branch, 'Branch') },
+    { label: pinned.includes(session.sessionId) ? 'Unpin' : 'Pin', icon: <Pin />, run: () => togglePin(session.sessionId) },
+    socketOpen && !session.online && { label: 'Remove', icon: <Trash />, danger: true, run: () => removeSession(session) },
+  ].filter(Boolean);
   function finishRename(value) {
     const current = currentSession(data.current);
     // Unmounting on a session switch can blur the input after the selection moved; never rename the new session.
@@ -449,16 +511,16 @@ function App() {
     else if (event.key === 'Escape') {
       renameDone.current = true;
       setEditing(null);
-      requestAnimationFrame(() => pencil.current?.focus());
+      requestAnimationFrame(() => actionsButton.current?.focus());
     }
   }
   const changeModel = value => sendChoice({ type: 'set_model', ...splitModelKey(value) }, { model: value });
   const changeThinking = level => sendChoice({ type: 'set_thinking', level }, { thinkingLevel: level });
   function removeSession(session) {
-    const name = (history.optimistic[session.processId]?.name ?? session.name) || 'Pi';
+    const name = displayName(session);
     if (!confirm(`Remove "${name}" from the list? Its saved conversation copy on this server is deleted. Pi's own session is not affected.`)) return;
     if (socket.current?.readyState !== WebSocket.OPEN) return;
-    const list = data.current.sessions;
+    const list = pinFirst(data.current.sessions, pinned);
     const index = list.findIndex(item => item.processId === session.processId);
     removing.current = { processId: session.processId, next: (list[index + 1] ?? list[index - 1])?.processId };
     socket.current.send(JSON.stringify({ type: 'remove', processId: session.processId }));
@@ -496,7 +558,7 @@ function App() {
           setInPage(true);
         }
       }
-    } catch (error) { setStatus(error.message || 'Notifications unavailable'); }
+    } catch (error) { notify(error.message || 'Notifications unavailable', 'error'); }
     finally { setPushBusy(false); }
   }
 
@@ -517,17 +579,18 @@ function App() {
     <aside id="sidebar" ref={sidebar} className={drawer ? 'open' : undefined} aria-label="Sessions">
       <div className="sidebar-header">{brand}</div>
       <nav id="sessions">
-        {history.sessions.map(session => {
+        {pinFirst(history.sessions, pinned).map(session => {
           const state = sessionStatus(session);
-          const name = (history.optimistic[session.processId]?.name ?? session.name) || 'Pi';
-          return <div key={session.processId} className="thread-row">
+          const name = displayName(session);
+          const isPinned = pinned.includes(session.sessionId);
+          return <div key={session.processId} className={`thread-row ${state}`}>
             <button type="button" className="thread-item" data-process={session.processId} title={session.cwd} aria-current={session.processId === history.selected ? 'true' : undefined} onClick={() => select(session.processId)}>
               <span className={`dot ${state}`} aria-hidden="true" /><span className="thread-item-title">{name}</span>
-              <span className="thread-item-time">{relativeTime(session.updatedAt, now)}</span>
-              <span className="sr-only">, {state}</span>
+              <span className="thread-item-time">{isPinned && <Pin />}{relativeTime(session.updatedAt, now)}</span>
+              <Location session={session} />
+              <span className="sr-only">, {statusLabel[state]}{isPinned ? ', pinned' : ''}</span>
             </button>
-            {!session.online && socketOpen && <button type="button" className="icon-button thread-remove" aria-label={`Remove ${name}`} title="Remove offline session"
-              onClick={() => removeSession(session)}><Remove /></button>}
+            <SessionMenu actions={sessionActions(session)} label={`Actions for ${name}`} className="thread-actions" />
           </div>;
         })}
         {!history.sessions.length && <p className="sidebar-empty">Connected Pi sessions appear here.</p>}
@@ -539,15 +602,17 @@ function App() {
       <header className="thread-header">
         <button ref={menu} type="button" className="icon-button menu-button" aria-label="Sessions" aria-controls="sidebar" aria-expanded={drawer} onClick={() => drawer ? closeDrawer() : openDrawer()}>
           <Icon><path d="M4 6h16M4 12h16M4 18h16" /></Icon></button>
-        <div className="thread-heading">{renaming
+        <div className="thread-heading"><div className="thread-title">{renaming
           ? <input className="title-input" aria-label="Session name" defaultValue={title} maxLength={1024} autoFocus
             onFocus={event => event.currentTarget.select()} onBlur={event => finishRename(event.currentTarget.value)} onKeyDown={onRenameKey} />
-          : <><h2 id="session-title">{title || 'Your chats'}</h2>
-            {active && <button ref={pencil} type="button" className="icon-button" aria-label="Rename session" onClick={startRename}><Pencil /></button>}</>}</div>
-        {item && <span className={`badge ${sessionStatus(item)}`}><span className={`dot ${sessionStatus(item)}`} aria-hidden="true" />{sessionStatus(item)}</span>}
-        <span id="status" role="status" title={status}>{status}</span>
+          : <><h2 id="session-title">{item ? displayName(item) : 'Your chats'}</h2>
+            {item && <SessionMenu actions={sessionActions(item)} label={`Actions for ${displayName(item)}`} buttonRef={actionsButton} align="start" />}</>}</div>
+          {item && <Location session={item} />}</div>
+        {badge && <span className={`badge ${badge}`}><span className={`dot ${badge}`} aria-hidden="true" />{statusLabel[badge]}</span>}
         {canNotify && <button type="button" className={`icon-button notify-toggle${notifyOn ? ' on' : ''}`} aria-pressed={notifyOn} disabled={pushBusy}
           aria-label="Notifications" title={notifyOn ? 'Notifications on' : 'Notifications off'} onClick={toggleNotifications}>{notifyOn ? <Bell /> : <BellOff />}</button>}
+        <div className="toast-region" role="status" aria-live="polite">{toast && <div key={toast.id} className={`toast ${toast.tone}`}>
+          {toast.tone === 'error' ? <Alert /> : <Check />}<span>{toast.text}</span></div>}</div>
       </header>
       <div id="history" ref={log} role="log" aria-live="polite" aria-relevant="additions" onScroll={event => {
         const node = event.currentTarget;

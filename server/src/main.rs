@@ -380,7 +380,10 @@ struct Session {
     connection: String,
     name: String,
     cwd: String,
+    branch: Option<String>,
     busy: bool,
+    waiting: bool,
+    asking: bool,
     updated_at: u64,
     model: Option<Value>,
     thinking_level: Option<String>,
@@ -391,7 +394,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"busy":self.busy,"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -399,6 +402,7 @@ impl Session {
             session_id: self.id.clone(),
             name: self.name.clone(),
             cwd: self.cwd.clone(),
+            branch: self.branch.clone(),
             updated_at: self.updated_at,
             model: self.model.clone(),
             thinking_level: self.thinking_level.clone(),
@@ -418,6 +422,8 @@ struct StoredMeta {
     session_id: String,
     name: String,
     cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     updated_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<Value>,
@@ -644,7 +650,10 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 connection: Uuid::new_v4().to_string(),
                 name: meta.name,
                 cwd: meta.cwd,
+                branch: meta.branch,
                 busy: false,
+                waiting: false,
+                asking: false,
                 updated_at: meta.updated_at,
                 model: meta.model,
                 thinking_level: meta.thinking_level,
@@ -1167,7 +1176,10 @@ fn agent_message(
             connection,
             name: name.into(),
             cwd: cwd.into(),
+            branch: valid_id(&v["branch"]).map(String::from),
             busy,
+            waiting: v["waiting"].as_bool().unwrap_or(false),
+            asking: v["asking"].as_bool().unwrap_or(false),
             updated_at,
             model: model_value(&v["model"], true),
             thinking_level: thinking_level(&v["thinkingLevel"]).map(String::from),
@@ -1255,14 +1267,21 @@ fn agent_message(
                     "message_end",
                     "agent_start",
                     "agent_settled",
+                    "ui_prompt_start",
+                    "ui_prompt_end",
                 ]
                 .contains(&v["event"]["type"].as_str().unwrap_or("")) =>
         {
             let kind = v["event"]["type"].as_str().unwrap();
             let mut changed = false;
             let previous_updated_at = session.updated_at;
+            if kind == "ui_prompt_start" || kind == "ui_prompt_end" {
+                session.waiting = kind == "ui_prompt_start";
+                changed = true;
+            }
             if kind == "agent_start" || kind == "agent_settled" {
                 session.busy = kind == "agent_start";
+                session.asking = v["event"]["asking"] == true;
                 if kind == "agent_start" {
                     session.updated_at = session.updated_at.max(
                         SystemTime::now()
@@ -1297,9 +1316,9 @@ fn agent_message(
             if kind == "message_end" {
                 send(tx, json!({"type":"history","sessionId":s}));
             }
-            if kind == "agent_settled" {
+            if let Some(body) = notice_body(&v["event"]) {
                 if let Some(push) = &app.settings.push {
-                    let payload = push_payload(&inner.sessions[p.as_str()].name, p, &s);
+                    let payload = push_payload(&inner.sessions[p.as_str()].name, p, &s, &body);
                     for subscription in inner.subscriptions.iter().cloned() {
                         let (push, payload) = (push.clone(), payload.clone());
                         let (state, persist) = (app.inner.clone(), app.persist.clone());
@@ -1411,10 +1430,33 @@ fn browser_message(app: &App, tx: &Sender, v: &Value) {
         ),
     }
 }
-fn push_payload(name: &str, process: &str, session: &str) -> Vec<u8> {
+fn notice_body(event: &Value) -> Option<String> {
+    let text = |key: &str, max: usize| {
+        event[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(|t| t.chars().take(max).collect::<String>())
+    };
+    match event["type"].as_str()? {
+        "agent_settled" => {
+            Some(text("summary", 200).unwrap_or_else(|| "Finished responding".into()))
+        }
+        "ui_prompt_start" => Some(text("title", 120).map_or_else(
+            || "Needs your input".into(),
+            |title| format!("Needs your input: {title}"),
+        )),
+        _ => None,
+    }
+}
+fn push_payload(name: &str, process: &str, session: &str, body: &str) -> Vec<u8> {
     let title: String = name.trim().chars().take(80).collect();
-    let title = if title.is_empty() { "Pi".into() } else { title };
-    json!({"title":title,"body":"Finished responding","processId":process,"sessionId":session})
+    let title = if title.is_empty() {
+        "New Session".into()
+    } else {
+        title
+    };
+    json!({"title":title,"body":body,"processId":process,"sessionId":session})
         .to_string()
         .into_bytes()
 }

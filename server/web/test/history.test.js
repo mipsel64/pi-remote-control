@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { buildAsset, choose, contentText, initialHistory, needsHomeScreen, receive, sessionStatus, settledNotice, swipeAction, unchoose, appHeight } from '../src/history.js';
+import { buildAsset, choose, contentText, folderName, initialHistory, pinFirst, needsHomeScreen, receive, sessionStatus, sessionNotice, swipeAction, unchoose, appHeight } from '../src/history.js';
 
 const session = (sessionId = 's1', connectionId = 'c1', online = true) =>
   ({ processId: 'p1', sessionId, connectionId, name: 'Pi', cwd: '/tmp', online, busy: false });
@@ -22,25 +22,40 @@ test('sessions sort by latest chat update without mutating the received list', (
   assert.equal(updated.selected, 'new');
 });
 
+test('folder names and pinned sessions', () => {
+  assert.equal(folderName('/Users/me/projects/app/'), 'app');
+  assert.equal(folderName('C:\\work\\repo'), 'repo');
+  assert.equal(folderName('/'), '/');
+  const sessions = ['a', 'b', 'c'].map(sessionId => ({ sessionId }));
+  assert.deepEqual(pinFirst(sessions, ['c']).map(item => item.sessionId), ['c', 'a', 'b']);
+});
+
 test('in-page notice only for a settled prompt the user is not looking at', () => {
   const sessions = [session(), { ...session(), processId: 'p2', name: '' }];
   const settled = (processId = 'p1') => ({ type: 'event', processId, sessionId: 's1', event: { type: 'agent_settled' } });
   const view = { enabled: true, hidden: false, selected: 'p2', sessions };
-  assert.deepEqual(settledNotice(settled(), view), { title: 'Pi', body: 'Finished responding', tag: 'p1' });
-  assert.equal(settledNotice(settled('p2'), view), null);
-  assert.deepEqual(settledNotice(settled('p2'), { ...view, hidden: true }), { title: 'Pi', body: 'Finished responding', tag: 'p2' });
-  assert.equal(settledNotice(settled(), { ...view, enabled: false }), null);
-  assert.equal(settledNotice(settled('gone'), view), null);
-  assert.equal(settledNotice({ ...settled(), event: { type: 'agent_start' } }, view), null);
-  assert.equal(settledNotice({ type: 'sessions', sessions }, view), null);
+  assert.deepEqual(sessionNotice(settled(), view), { title: 'Pi', body: 'Finished responding', tag: 'p1' });
+  assert.equal(sessionNotice(settled('p2'), view), null);
+  assert.deepEqual(sessionNotice(settled('p2'), { ...view, hidden: true }), { title: 'New Session', body: 'Finished responding', tag: 'p2' });
+  assert.equal(sessionNotice(settled(), { ...view, enabled: false }), null);
+  assert.equal(sessionNotice(settled('gone'), view), null);
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_start' } }, view), null);
+  const prompt = (title) => ({ ...settled(), event: { type: 'ui_prompt_start', kind: 'confirm', title } });
+  assert.equal(sessionNotice(prompt(' Allow rm? '), view).body, 'Needs your input: Allow rm?');
+  assert.equal(sessionNotice(prompt(), view).body, 'Needs your input');
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'ui_prompt_end' } }, view), null);
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_settled', asking: true, summary: 'Ship it?' } }, view).body, 'Ship it?');
+  assert.equal(sessionNotice({ type: 'sessions', sessions }, view), null);
   const long = [{ ...session(), name: 'x'.repeat(90) }];
-  assert.equal(settledNotice(settled(), { ...view, sessions: long }).title, 'x'.repeat(80));
+  assert.equal(sessionNotice(settled(), { ...view, sessions: long }).title, 'x'.repeat(80));
 });
 
 test('session status prioritizes offline over stale busy state', () => {
   assert.equal(sessionStatus({ online: true, busy: true }), 'busy');
   assert.equal(sessionStatus({ online: true, busy: false }), 'idle');
   assert.equal(sessionStatus({ online: false, busy: true }), 'offline');
+  assert.equal(sessionStatus({ online: true, busy: true, waiting: true }), 'waiting');
+  assert.equal(sessionStatus({ online: false, waiting: true }), 'offline');
 });
 
 
