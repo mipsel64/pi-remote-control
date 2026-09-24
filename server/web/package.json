@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "vite build && node scripts/precache.mjs",
+    "build": "vite build && node scripts/icons.mjs && node scripts/precache.mjs",
     "test": "npm run build && node --test test/*.test.js"
   },
   "dependencies": {

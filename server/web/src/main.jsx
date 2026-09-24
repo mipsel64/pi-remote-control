@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
 import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
+import ICON_COLORS from './icon-colors.json';
 import '@fontsource-variable/geist-mono';
 import './style.css';
 
@@ -12,25 +13,36 @@ const homeScreenHint = needsHomeScreen({ userAgent: navigator.userAgent, platfor
 const IN_PAGE_KEY = 'prc-notifications';
 const PIN_KEY = 'prc-pinned';
 const SETTINGS_KEY = 'prc-settings';
+// Manifest, SVG favicon, PNG favicon, and Apple touch icon; scripts/icons.mjs builds the coloured ones.
+const iconFiles = color => color === 'default' ? ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/apple-touch-icon.png']
+  : ['.webmanifest', '.svg', '-192.png', '-180.png'].map(suffix => `/icons/${color}${suffix}`);
 const SETTING_OPTIONS = {
   theme: [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']],
   font: [['system', 'System'], ['ioskeley', 'Ioskeley'], ['geist', 'Geist']],
   size: [['90', '90%'], ['100', '100%'], ['115', '115%'], ['130', '130%']],
+  icon: Object.keys(ICON_COLORS).map(color => {
+    const label = color[0].toUpperCase() + color.slice(1);
+    return [color, <img className="swatch" src={iconFiles(color)[1]} alt={label} title={label} />];
+  }),
 };
-const DEFAULT_SETTINGS = { theme: 'system', font: 'system', size: '100' };
+const DEFAULT_SETTINGS = { theme: 'system', font: 'system', size: '100', icon: 'default' };
 function loadSettings() {
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)); } catch { /* Use defaults. */ }
   return Object.fromEntries(Object.entries(SETTING_OPTIONS).map(([key, options]) =>
     [key, options.some(([value]) => value === saved?.[key]) ? saved[key] : DEFAULT_SETTINGS[key]]));
 }
-function applySettings({ theme, font, size }) {
+function applySettings({ theme, font, size, icon }) {
   const root = document.documentElement;
   Object.assign(root.dataset, { theme, font });
   // Percent keeps the browser's own default text size as the baseline.
   root.style.fontSize = `${size}%`;
   for (const meta of document.querySelectorAll('meta[name="theme-color"]'))
     meta.content = (theme === 'system' ? meta.media.includes('dark') : theme === 'dark') ? '#000000' : '#ffffff';
+  // Home-screen installs copy whatever these point at when added; an existing shortcut keeps its old icon.
+  const files = iconFiles(icon);
+  ['link[rel="manifest"]', 'link[rel="icon"][type="image/svg+xml"]', 'link[rel="icon"][type="image/png"]', 'link[rel="apple-touch-icon"]']
+    .forEach((selector, index) => document.querySelector(selector)?.setAttribute('href', files[index]));
 }
 applySettings(loadSettings());
 // Older builds could save in-page mode on HTTPS, which shows "Disable" while nothing is subscribed.
@@ -234,6 +246,8 @@ function SettingsDialog({ dialog, settings, onChange, onSignOut }) {
       <Choice legend="Theme" name="theme" value={settings.theme} onChange={onChange} />
       <Choice legend="Font" name="font" value={settings.font} onChange={onChange} />
       <Choice legend="Text size" name="size" value={settings.size} onChange={onChange} />
+      <Choice legend="App icon" name="icon" value={settings.icon} onChange={onChange} />
+      <p className="settings-hint">Used by the browser tab and new home-screen shortcuts. To change an existing shortcut, remove it and add it again.</p>
       <div className="settings-actions"><span className="settings-label">Account</span>
         <button type="button" className="settings-button" onClick={onSignOut}>Sign out</button></div>
     </div>

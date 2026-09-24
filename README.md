@@ -48,6 +48,8 @@ Set `publicOrigin` in `~/.config/prc/config.json` to that exact address (no trai
 
 For notifications on iPhone, open the address in Safari, tap **Share → Add to Home Screen**, open the app from the new icon, and tap the **bell** in the top-right corner.
 
+To tell several servers apart on the Home Screen, pick an **App icon** colour in Settings before adding the shortcut. A shortcut keeps the icon it was added with, so remove it and add it again after changing the colour.
+
 ## Pi commands
 
 | Command | What it does |

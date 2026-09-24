@@ -229,6 +229,8 @@ button.model-trigger:enabled:hover, .model-trigger[aria-expanded="true"] { backg
 .segmented label:hover span { color: var(--foreground); }
 .segmented input:checked + span { background: var(--muted); color: var(--foreground); }
 .segmented input:focus-visible + span { outline: 1px solid var(--ring); }
+.segmented .swatch { display: block; width: 1.25rem; height: 1.25rem; margin: 0 auto; }
+.settings-hint { margin: -.75rem 0 0; font-size: .75rem; }
 .settings-actions { display: grid; gap: .375rem; }
 .settings-button { height: 2.25rem; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); }
 .settings-button:hover { background: var(--muted); }
