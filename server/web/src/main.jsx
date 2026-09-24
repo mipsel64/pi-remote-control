@@ -706,9 +706,10 @@ function App() {
       </div>
       <div className="composer-wrap">
         {!atBottom && <button type="button" className="icon-button scroll-bottom" aria-label="Scroll to bottom" onClick={scrollToBottom}><Icon><path d="M12 5v14M19 12l-7 7-7-7" /></Icon></button>}
-        {active && item.queued?.length > 0 && <ol className="queue" aria-label="Queued follow-ups">
-          {item.queued.map((queued, index) => <li key={index}><span className="queue-label">queued</span><span className="queue-text" title={queued}>{queued}</span></li>)}
-        </ol>}
+        {active && item.queued?.length > 0 && <div className="queue">
+          <div className="queue-label">{item.queued.length > 1 ? 'queued · sent as one message' : 'queued'}</div>
+          <ol aria-label="Queued follow-ups">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
+        </div>}
         <form id="composer" onSubmit={prompt}><label htmlFor="prompt" className="sr-only">Message</label>
           <textarea id="prompt" ref={input} rows="1" value={text} onChange={event => setText(event.target.value)} onKeyDown={onPromptKey} disabled={!active}
             placeholder={!item ? 'Select a session' : !socketOpen ? 'Reconnecting…' : !item.online ? 'Offline — showing last saved conversation' : busy ? 'Queue a follow-up ...' : 'Write a message ...'} />

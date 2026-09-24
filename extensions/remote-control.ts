@@ -168,8 +168,11 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Tracked while disconnected too, so a reconnect during an open dialog still reports it.
   let waiting = false;
   let asking = false;
-  // Kept across /rc close: Pi still runs the follow-ups and the events below keep this in sync.
+  // Held here instead of Pi's queue, which extensions cannot edit, so later prompts join the waiting one.
+  // Kept across /rc close: the run still settles and delivers it.
   let queued: string[] = [];
+  let stopped = false;
+  let runSignal: AbortSignal | undefined;
   // Server cap is 256 UTF-16 units; cut on code points so a surrogate pair is never split.
   const previews = () => queued.map(text => {
     const flat = text.replace(/\s+/g, ' ').trim();
@@ -182,8 +185,20 @@ export default function remoteControl(pi: ExtensionAPI) {
     return `${cut}…`;
   });
   function setQueued(current: ExtensionContext, next: string[]) {
+    if (!queued.length && !next.length) return;
     queued = next;
     send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'queue_update', queued: previews() } });
+  }
+  function sendQueued(current: ExtensionContext, texts = queued) {
+    setQueued(current, []);
+    // followUp is ignored while Pi is idle, and still queues safely if another prompt started first.
+    pi.sendUserMessage(texts.join('\n\n'), { deliverAs: 'followUp' });
+  }
+  // Mirrors Pi's own Stop, which puts queued messages back in the terminal editor.
+  function restoreQueued(current: ExtensionContext) {
+    const text = queued.join('\n\n');
+    setQueued(current, []);
+    current.ui.setEditorText([text, current.ui.getEditorText()].filter(part => part.trim()).join('\n\n'));
   }
 
   function title(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
@@ -348,11 +363,13 @@ export default function remoteControl(pi: ExtensionAPI) {
       if (command.type === 'history') snapshot(current);
       else if (command.type === 'models') send({ type: 'models', processId: entryId(current), sessionId: command.sessionId, models: modelList(current) });
       else if (command.type === 'prompt' && typeof command.text === 'string' && command.text.trim() && Buffer.byteLength(command.text) <= 16 * 1024) {
-        const idle = current.isIdle();
-        pi.sendUserMessage(command.text, idle ? undefined : { deliverAs: 'followUp' });
-        if (!idle) setQueued(current, [...queued, command.text]);
-      } else if (command.type === 'abort' && !current.isIdle()) current.abort();
-      else if (command.type === 'set_model' && typeof command.provider === 'string' && typeof command.modelId === 'string') {
+        const texts = [...queued, command.text];
+        if (current.isIdle()) sendQueued(current, texts);
+        else setQueued(current, texts);
+      } else if (command.type === 'abort' && !current.isIdle()) {
+        stopped = true;
+        current.abort();
+      } else if (command.type === 'set_model' && typeof command.provider === 'string' && typeof command.modelId === 'string') {
         const model = current.modelRegistry.find(command.provider, command.modelId);
         if (!model || !advertisedModels(current).some(item => item.provider === model.provider && item.id === model.id)) return;
         const warn = () => current.ui.notify(`Remote control could not switch to ${model.provider}/${model.id}; check that provider's auth`, 'warning');
@@ -378,7 +395,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, current) => {
-    queued = [];
+    if (queued.length) restoreQueued(current);
     if (!ctx) return;
     ctx = current;
     if (socket?.readyState === WebSocket.OPEN) {
@@ -402,6 +419,8 @@ export default function remoteControl(pi: ExtensionAPI) {
     pi.on(type, (event, current) => {
       if (type === 'ui_prompt_start' || type === 'ui_prompt_end') waiting = type === 'ui_prompt_start';
       if (type === 'agent_start') asking = false;
+      // Per low-level run, so keep the latest; it also catches a Stop pressed during a tool call.
+      if (type === 'agent_start' || type === 'message_start') runSignal = current.signal ?? runSignal;
       const usage = type === 'message_end' || type === 'agent_settled' ? contextUsage(current) : null;
       let payload: object = usage ? { ...event, contextUsage: usage } : event;
       if (type === 'agent_settled') {
@@ -414,14 +433,30 @@ export default function remoteControl(pi: ExtensionAPI) {
       // Tools may switch branches during a run.
       if (ctx && type === 'agent_settled' && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
       send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
-      if (type === 'message_start' && 'message' in event && event.message?.role === 'user') {
-        const content = (event.message as { content?: unknown }).content;
-        const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(part => part?.type === 'text').map(part => part.text).join('') : '';
-        const index = queued.indexOf(text);
-        if (index >= 0) setQueued(current, queued.filter((_, i) => i !== index));
+      if (type === 'agent_settled') {
+        // A Stop skips agent_before_settle; otherwise the prompt arrived after it, and Pi defers a prompt sent now past settling.
+        if (queued.length && (stopped || runSignal?.aborted)) restoreQueued(current);
+        else if (queued.length) sendQueued(current);
+        stopped = false;
+        runSignal = undefined;
       }
-      // A settled run has no queued continuation left; anything else was returned to Pi's editor.
-      if (type === 'agent_settled' && queued.length) setQueued(current, []);
+    });
+  }
+  // Awaited while Pi is still streaming, so a follow-up queued here continues this run natively.
+  // ponytail: a slow Pi input handler can still submit it after a Stop pressed meanwhile, as with any extension prompt.
+  pi.on('agent_before_settle', async (event, current) => {
+    if (!queued.length || event.outcome === 'aborted' || stopped) return;
+    sendQueued(current);
+    // sendUserMessage queues asynchronously (input handlers first); Pi checks its queue once this resolves.
+    for (let tries = 0; tries < 100 && !current.hasPendingMessages(); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  });
+  // A manual /compact is not an agent run; Pi goes idle right after this event, so deliver on the next tick.
+  for (const type of ['session_compact', 'session_compact_failed'] as const) {
+    pi.on(type, (_event, current) => {
+      setTimeout(() => {
+        try { if (queued.length && current.isIdle()) sendQueued(current); }
+        catch { /* The runtime was replaced (/reload, /new) before the tick. */ }
+      }, 0);
     });
   }
   pi.on('session_shutdown', stop);
