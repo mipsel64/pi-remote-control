@@ -4,6 +4,8 @@ Control your **already-running** [Pi](https://pi.dev) sessions from a phone or b
 
 It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`@mipsel64/pi-remote-control` Pi extension**, which attaches a Pi session when you run `/rc`.
 
+![Pi Remote Control demo: a Pi terminal session mirrored and controlled from a phone](docs/demo.gif)
+
 > Remote prompts run tools with your user's permissions. Treat access like SSH: keep the server on localhost or your private Tailscale network.
 
 ## Quick start
