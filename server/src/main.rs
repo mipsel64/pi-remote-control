@@ -943,6 +943,7 @@ fn asset(uri: &Uri, head: bool) -> Response {
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
     let body = if head {
