@@ -90,7 +90,7 @@ function thinkingLevels(model: Model) {
 }
 
 function advertisedModels(current: ExtensionContext) {
-  const models = current.scopedModels.length ? current.scopedModels.map(scoped => scoped.model) : current.modelRegistry.getAvailable();
+  const models = current.scopedModels?.length ? current.scopedModels.map(scoped => scoped.model) : current.modelRegistry.getAvailable();
   const seen = new Set<string>();
   return models.filter(model => {
     const key = `${model.provider}\0${model.id}`;

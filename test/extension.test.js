@@ -483,3 +483,48 @@ test('hello advertises models and thinking; remote model and thinking changes ar
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(messages.length, 2);
 });
+
+test('missing scopedModels falls back to available models for hello, models, and set_model', async t => {
+  const wss = new WebSocketServer({ port: 0 });
+  await once(wss, 'listening');
+  const previous = [process.env.PI_RC_URL, process.env.PI_RC_AGENT_TOKEN];
+  process.env.PI_RC_URL = `ws://127.0.0.1:${wss.address().port}/agent`;
+  process.env.PI_RC_AGENT_TOKEN = 'secret';
+  const pi = mockPi();
+  const ctx = context();
+  delete ctx.scopedModels;
+  t.after(() => new Promise(resolve => {
+    pi.emit('session_shutdown', ctx);
+    if (previous[0] === undefined) delete process.env.PI_RC_URL; else process.env.PI_RC_URL = previous[0];
+    if (previous[1] === undefined) delete process.env.PI_RC_AGENT_TOKEN; else process.env.PI_RC_AGENT_TOKEN = previous[1];
+    for (const ws of wss.clients) ws.terminate();
+    wss.close(resolve);
+  }));
+  (await load())(pi);
+  const connected = once(wss, 'connection');
+  pi.command('rc', '', ctx);
+  const [ws] = await connected;
+  const messages = [];
+  ws.on('message', raw => messages.push(JSON.parse(raw.toString())));
+  async function until(check) {
+    for (let i = 0; i < 200; i++) {
+      if (check()) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('Timed out waiting for WS message');
+  }
+  const expected = [
+    { provider: 'anthropic', id: 'sonnet', name: 'Sonnet', reasoning: true },
+    { provider: 'openai', id: 'mini', name: 'Mini', reasoning: false },
+  ];
+  await until(() => messages.some(msg => msg.type === 'hello'));
+  assert.deepEqual(messages.find(msg => msg.type === 'hello').models, expected);
+  ws.send(JSON.stringify({ type: 'models', sessionId: 's1' }));
+  await until(() => messages.some(msg => msg.type === 'models'));
+  assert.deepEqual(messages.find(msg => msg.type === 'models').models, expected);
+  ws.send(JSON.stringify({ type: 'set_model', sessionId: 's1', provider: 'openai', modelId: 'hidden' }));
+  ws.send(JSON.stringify({ type: 'set_model', sessionId: 's1', provider: 'openai', modelId: 'mini' }));
+  ws.send(JSON.stringify({ type: 'models', sessionId: 's1' }));
+  await until(() => messages.filter(msg => msg.type === 'models').length === 2);
+  assert.deepEqual(pi.modelsSet, [mini]);
+});
