@@ -41,10 +41,13 @@ export function buildThread(entries, stream) {
     if (role === 'bashExecution') return [{ kind: 'bash', command: String(message.command ?? ''), output: String(message.output ?? ''), exitCode: message.exitCode }];
     if (role === 'compactionSummary' || role === 'branchSummary')
       return [{ kind: 'summary', label: role === 'compactionSummary' ? 'Context compacted' : 'Branch summarized', text: String(message.summary ?? '') }];
-    if (role === 'custom') return message.display === false ? [] : [{ kind: 'custom', label: String(message.customType || 'custom'), text: fallbackText(message) }];
-    return [{ kind: 'custom', label: role, text: fallbackText(message) }];
+    if (role === 'custom') return message.display === false ? [] : [customItem(String(message.customType || 'custom'), fallbackText(message))];
+    return [customItem(role, fallbackText(message))];
   });
 }
+
+// Extension messages are often written for the model (e.g. XML with a <summary>); show one line, the rest on expand.
+const customItem = (label, text) => ({ kind: 'custom', label, text, summary: firstLine(/<summary>([\s\S]*?)<\/summary>/.exec(text)?.[1] ?? text) });
 
 const firstLine = value => {
   const line = value.trim().split('\n')[0];

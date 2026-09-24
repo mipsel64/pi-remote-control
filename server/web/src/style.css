@@ -156,6 +156,9 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 .divider-card > summary::after { order: 2; }
 .card-body { margin-top: .75rem; padding: .625rem .75rem; border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; }
 .custom-card { padding-left: .75rem; border-left: 2px solid var(--border); font-size: 13px; }
+.custom-line { display: flex; align-items: center; gap: .5rem; min-width: 0; }
+.custom-card .card-label { flex: none; }
+.custom-card > .plain { margin-top: .5rem; }
 .card-label { color: var(--foreground); font-size: 12px; font-weight: 600; }
 .typing { width: .6em; height: 1.2em; background: var(--foreground); animation: blink 1s steps(1) infinite; }
 

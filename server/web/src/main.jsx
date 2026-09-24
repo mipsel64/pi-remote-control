@@ -71,7 +71,9 @@ function Item({ item, live }) {
   if (item.kind === 'tool') return <ToolCard call={item.call} live={false} />;
   if (item.kind === 'bash') return <Terminal command={item.command} output={item.output} exitCode={item.exitCode} />;
   if (item.kind === 'summary') return <details className="divider-card"><summary><span>{item.label}</span><Chevron /></summary><div className="card-body"><Text text={item.text} /></div></details>;
-  return <div className="custom-card"><div className="card-label">{item.label}</div><div className="plain">{item.text}</div></div>;
+  const line = <><span className="card-label">{item.label}</span><span className="tool-summary">{item.summary}</span></>;
+  return item.summary === item.text.trim() ? <div className="custom-card"><div className="custom-line">{line}</div></div>
+    : <details className="custom-card"><summary>{line}<Chevron /></summary><div className="plain">{item.text}</div></details>;
 }
 
 const Back = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
