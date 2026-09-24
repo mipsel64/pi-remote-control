@@ -43,10 +43,13 @@ function context(id = 's1') {
     get scopedModels() { return state.scoped; },
     modelRegistry: { getAvailable: () => state.available, find: (provider, modelId) => [sonnet, mini, hidden].find(model => model.provider === provider && model.id === modelId) },
     ui: { notify: (...args) => state.notices.push(args), input: async () => state.inputs.shift(),
-      theme: { fg: (_color, text) => text }, setStatus: (...args) => state.statuses.push(args) },
+      theme: { fg: (_color, text) => text }, setStatus: (...args) => state.statuses.push(args),
+      getEditorText: () => state.editor ?? '', setEditorText: text => { state.editor = text; } },
     sessionManager: { getSessionId: () => state.id, getBranch: () => state.entries },
     isIdle: () => state.idle,
     getContextUsage: () => state.usage,
+    get signal() { return state.signal; },
+    hasPendingMessages: () => state.pending ?? false,
     abort: () => { state.aborted++; },
   };
 }
@@ -329,7 +332,7 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   first.ws.send(JSON.stringify({ type: 'abort', sessionId: 'wrong' }));
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'new' }));
   await until(() => pi.prompts.length === 1);
-  assert.deepEqual(pi.prompts, [['new', undefined]]);
+  assert.deepEqual(pi.prompts, [['new', { deliverAs: 'followUp' }]]);
   ctx.state.idle = false;
   pi.emit('agent_start', ctx);
   assert.deepEqual((await first.next(msg => msg.type === 'event')).event, { type: 'agent_start' });
@@ -355,11 +358,63 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   assert.deepEqual((await settle('z')).contextUsage, { tokens: 42, contextWindow: 1000 });
   delete ctx.state.usage;
   ctx.state.entries = saved;
+  // Busy prompts wait in the extension and reach Pi as one follow-up before the run settles.
+  const queue = async () => (await first.next(msg => msg.type === 'event' && msg.event.type === 'queue_update')).event.queued;
+  const settled = async () => {
+    pi.emit('agent_settled', ctx);
+    return (await first.next(msg => msg.type === 'event' && msg.event.type === 'agent_settled')).event;
+  };
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'later' }));
+  assert.deepEqual(await queue(), ['later']);
+  const long = `  aa${'😀'.repeat(130)} tail\n`;
+  const preview = `aa${'😀'.repeat(98)}…`;
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: long }));
+  assert.deepEqual(await queue(), ['later', preview]);
+  pi.emit('model_select', ctx, { type: 'model_select', model: sonnet, previousModel: sonnet, source: 'set' });
+  assert.deepEqual((await first.next(msg => msg.type === 'hello')).queued, ['later', preview]);
+  assert.equal(pi.prompts.length, 1);
+  ctx.state.pending = true;
+  await pi.emit('agent_before_settle', ctx, { type: 'agent_before_settle', outcome: 'completed' });
+  delete ctx.state.pending;
+  assert.deepEqual(pi.prompts.at(-1), [`later\n\n${long}`, { deliverAs: 'followUp' }]);
+  assert.deepEqual(await queue(), []);
+  // One that lands after agent_before_settle goes out as the run settles.
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'just in time' }));
+  assert.deepEqual(await queue(), ['just in time']);
+  await settled();
+  assert.deepEqual(await queue(), []);
+  assert.deepEqual(pi.prompts.at(-1), ['just in time', { deliverAs: 'followUp' }]);
+  // A manual /compact is not a run: what waited on it goes out once Pi is idle again.
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'during compact' }));
+  assert.deepEqual(await queue(), ['during compact']);
+  ctx.state.idle = true;
+  pi.emit('session_compact', ctx, { type: 'session_compact' });
+  assert.deepEqual(await queue(), []);
+  assert.deepEqual(pi.prompts.at(-1), ['during compact', { deliverAs: 'followUp' }]);
+  ctx.state.idle = false;
+
+  // Stop, from the browser or the terminal, returns queued text to Pi's editor instead of running it.
+  ctx.state.editor = 'draft';
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'after stop' }));
+  assert.deepEqual(await queue(), ['after stop']);
   first.ws.send(JSON.stringify({ type: 'abort', sessionId: 's1' }));
-  await until(() => pi.prompts.length === 2 && ctx.state.aborted === 1);
-  assert.deepEqual(pi.prompts[1], ['later', { deliverAs: 'followUp' }]);
-  assert.equal(ctx.state.aborted, 1);
+  await until(() => ctx.state.aborted === 1);
+  await pi.emit('agent_before_settle', ctx, { type: 'agent_before_settle', outcome: 'aborted' });
+  await settled();
+  assert.deepEqual(await queue(), []);
+  assert.equal(ctx.state.editor, 'after stop\n\ndraft');
+  const terminalRun = new AbortController();
+  ctx.state.signal = terminalRun.signal;
+  ctx.state.editor = '';
+  pi.emit('message_start', ctx, { type: 'message_start', message: { role: 'assistant', content: [] } });
+  delete ctx.state.signal;
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'terminal stop' }));
+  assert.deepEqual(await queue(), ['terminal stop']);
+  terminalRun.abort();
+  await settled();
+  assert.deepEqual(await queue(), []);
+  assert.equal(ctx.state.editor, 'terminal stop');
+  assert.equal(pi.prompts.length, 4);
   ctx.state.entries.push({ type: 'message', id: 'next' });
   pi.emit('session_tree', ctx);
   assert.equal((await first.next(msg => msg.type === 'snapshot')).entries.length, 2);
