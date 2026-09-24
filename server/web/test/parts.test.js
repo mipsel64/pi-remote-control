@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from '../src/parts.js';
+import { backgroundSummary, buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from '../src/parts.js';
 import { Markdown } from '../src/markdown.js';
 
 const message = message => ({ type: 'message', message });
@@ -197,4 +197,11 @@ test('usageSummary totals every reply and gauges the agent-reported context', ()
   assert.equal(usageSummary(entries).text, '$0.030');
   assert.equal(usageSummary([], { tokens: 0, contextWindow: 1000000 }).text, '0.0%/1M');
   assert.equal(usageSummary([message({ role: 'user', content: 'hi' })]), null);
+});
+
+test('backgroundSummary counts shells and subagents', () => {
+  const shell = { kind: 'shell' }, agent = { kind: 'agent' };
+  assert.equal(backgroundSummary([shell]), '1 shell running');
+  assert.equal(backgroundSummary([agent, agent]), '2 subagents running');
+  assert.equal(backgroundSummary([shell, agent, shell]), '2 shells \u00b7 1 subagent running');
 });

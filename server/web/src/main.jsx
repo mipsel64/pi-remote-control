@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
-import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from './parts.js';
+import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import '@fontsource-variable/geist-mono';
 import './style.css';
@@ -706,6 +706,15 @@ function App() {
       </div>
       <div className="composer-wrap">
         {!atBottom && <button type="button" className="icon-button scroll-bottom" aria-label="Scroll to bottom" onClick={scrollToBottom}><Icon><path d="M12 5v14M19 12l-7 7-7-7" /></Icon></button>}
+        {active && item.background?.length > 0 && <details className="background">
+          <summary><span className="dot busy" aria-hidden="true" /><span className="background-summary">{backgroundSummary(item.background)}</span><Chevron /></summary>
+          <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}>
+            <span className="background-kind">{job.kind === 'agent' ? 'agent' : 'shell'}</span>
+            <span className="background-label" title={job.label}>{job.label}</span>
+            <span className="background-time">{relativeTime(job.startedAt, now)}</span>
+            {job.detail && <span className="background-detail" title={job.detail}>{job.detail}</span>}
+          </li>)}</ul>
+        </details>}
         {active && item.queued?.length > 0 && <div className="queue">
           <div className="queue-label">{item.queued.length > 1 ? 'queued · sent as one message' : 'queued'}</div>
           <ol aria-label="Queued follow-ups">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>

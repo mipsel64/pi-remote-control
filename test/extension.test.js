@@ -618,3 +618,126 @@ test('missing scopedModels falls back to available models for hello, models, and
   await until(() => messages.filter(msg => msg.type === 'models').length === 2);
   assert.deepEqual(pi.modelsSet, [mini]);
 });
+
+// Synchronous like Pi's bus: handlers start inside emit.
+function bus() {
+  const handlers = new Map();
+  return {
+    on(channel, handler) {
+      handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+      return () => handlers.set(channel, handlers.get(channel).filter(item => item !== handler));
+    },
+    emit(channel, data) { for (const handler of handlers.get(channel) ?? []) handler(data); },
+  };
+}
+
+test('background shells and subagents come from other extensions over pi.events', async t => {
+  const wss = new WebSocketServer({ port: 0 });
+  await once(wss, 'listening');
+  const previous = [process.env.PI_RC_URL, process.env.PI_RC_AGENT_TOKEN];
+  process.env.PI_RC_URL = `ws://127.0.0.1:${wss.address().port}/agent`;
+  process.env.PI_RC_AGENT_TOKEN = 'secret';
+  const pi = mockPi();
+  pi.events = bus();
+  const ctx = context();
+  t.after(() => new Promise(resolve => {
+    pi.emit('session_shutdown', ctx);
+    if (previous[0] === undefined) delete process.env.PI_RC_URL; else process.env.PI_RC_URL = previous[0];
+    if (previous[1] === undefined) delete process.env.PI_RC_AGENT_TOKEN; else process.env.PI_RC_AGENT_TOKEN = previous[1];
+    for (const ws of wss.clients) ws.terminate();
+    wss.close(resolve);
+  }));
+  // Stand-ins: pi-processes answers inside emit, pi-subagents answers later on a per-request reply channel.
+  let processes = [
+    { id: 'p1', name: 'watch-ci', command: 'gh run watch 1 --exit-status', status: 'running', startTime: 1000 },
+    { id: 'p2', name: 'build', command: 'make', status: 'exited', startTime: 900 },
+    { id: 'p3', name: ' ', command: 'npm   run dev', status: 'terminating', startTime: 'soon' },
+    { name: 'no id', command: 'x', status: 'running' },
+  ];
+  pi.events.on('processes:request:list', ({ reply }) => reply(processes));
+  let fleet = { version: 1, totalActive: 2, omitted: 0, entries: [
+    { key: 'fleet-1', agent: 'reviewer', role: 'security', model: 'gpt-6-sol', startedAt: 2000, tokens: { input: 1, output: 2, total: 3 } },
+    { key: 'fleet-2', agent: ' ', startedAt: 1 },
+  ] };
+  const statusRequests = [];
+  pi.events.on('subagents:rpc:v1:request', request => statusRequests.push(request));
+  const answer = () => {
+    for (const { requestId } of statusRequests.splice(0))
+      pi.events.emit(`subagents:rpc:v1:reply:${requestId}`, { version: 1, requestId, method: 'status', success: true, data: { fleet } });
+  };
+  (await load())(pi);
+  const connected = once(wss, 'connection');
+  pi.command('rc', '', ctx);
+  const [ws] = await connected;
+  const messages = [];
+  ws.on('message', raw => messages.push(JSON.parse(raw.toString())));
+  async function until(check) {
+    for (let i = 0; i < 200; i++) {
+      if (check()) return;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('Timed out waiting for WS message');
+  }
+  const updates = () => messages.filter(msg => msg.type === 'event' && msg.event.type === 'background_update').map(msg => msg.event.background);
+  const watch = { kind: 'shell', id: 'p1', label: 'watch-ci', detail: 'gh run watch 1 --exit-status', startedAt: 1000 };
+  const dev = { kind: 'shell', id: 'p3', label: 'npm run dev', detail: 'npm run dev', startedAt: null };
+  const reviewer = { kind: 'agent', id: 'fleet-1', label: 'reviewer · security', detail: 'gpt-6-sol', startedAt: 2000 };
+
+  await until(() => messages.some(msg => msg.type === 'hello'));
+  assert.deepEqual(messages.find(msg => msg.type === 'hello').background, [watch, dev]);
+  assert.deepEqual(statusRequests.map(({ version, method }) => ({ version, method })), [{ version: 1, method: 'status' }]);
+  answer();
+  await until(() => updates().length === 1);
+  assert.deepEqual(updates()[0], [watch, dev, reviewer]);
+
+  // Changes during an in-flight status request collapse into one follow-up request.
+  pi.events.emit('subagent:child-status', {});
+  pi.events.emit('subagent:async-started', {});
+  pi.events.emit('subagent:async-complete', {});
+  assert.equal(statusRequests.length, 1);
+  fleet = { ...fleet, entries: [] };
+  answer();
+  await until(() => updates().length === 2);
+  assert.deepEqual(updates()[1], [watch, dev]);
+  assert.equal(statusRequests.length, 1);
+  answer();
+
+  processes = [];
+  pi.events.emit('processes:changed', { reason: 'ended' });
+  await until(() => updates().length === 3);
+  assert.deepEqual(updates()[2], []);
+  // Unchanged lists send nothing.
+  pi.events.emit('processes:changed', { reason: 'cleared' });
+  pi.events.emit('subagent:async-complete', {});
+  answer();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(updates().length, 3);
+
+  // A synchronous replier works too.
+  fleet = { version: 1, entries: [{ key: 'fleet-3', agent: 'worker', startedAt: 3000 }] };
+  const offSync = pi.events.on('subagents:rpc:v1:request', () => answer());
+  pi.events.emit('subagent:async-started', {});
+  await until(() => updates().length === 4);
+  assert.deepEqual(updates()[3], [{ kind: 'agent', id: 'fleet-3', label: 'worker', detail: '', startedAt: 3000 }]);
+  // No reply within 5 s means pi-subagents stopped answering, so its last list is dropped.
+  offSync();
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  pi.events.emit('subagent:async-complete', {});
+  t.mock.timers.tick(5000);
+  t.mock.timers.reset();
+  await until(() => updates().length === 5);
+  assert.deepEqual(updates()[4], []);
+  statusRequests.length = 0;
+
+  // A full shell list still leaves room for subagents.
+  processes = Array.from({ length: 25 }, (_, i) => ({ id: `s${i}`, name: `sleep ${i}`, command: 'sleep 60', status: 'running', startTime: 1 }));
+  fleet = { version: 1, entries: [{ key: 'fleet-4', agent: 'scout', startedAt: 4 }] };
+  pi.events.on('subagents:rpc:v1:request', () => answer());
+  pi.events.emit('processes:changed', { reason: 'started' });
+  await until(() => updates().length === 6);
+  assert.equal(updates()[5].length, 20);
+  pi.events.emit('subagent:async-started', {});
+  await until(() => updates().length === 7);
+  assert.deepEqual(updates()[6].map(item => item.kind).filter(kind => kind === 'shell').length, 19);
+  assert.equal(updates()[6].at(-1).label, 'scout');
+});
