@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
-import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary } from './parts.js';
+import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import '@fontsource-variable/geist-mono';
 import './style.css';
@@ -275,6 +275,7 @@ function App() {
   const active = socketOpen && item?.online;
   const busy = Boolean(active && item.busy);
   const items = buildThread(history.entries, history.stream);
+  const usage = item && usageSummary(history.entries, item.context);
   const title = history.optimistic[item?.processId]?.name ?? item?.name;
   const badge = !socketOpen ? 'connecting' : item ? sessionStatus(item) : null;
   const renameKey = active ? `${item.processId}\u0000${item.sessionId}` : null;
@@ -637,6 +638,7 @@ function App() {
           <div className="composer-actions">
             {/* Remounting on session switch, offline, or socket drop closes the menu. */}
             <ModelMenu key={renameKey} picker={modelPicker(item, history.models[item?.processId], history.optimistic[item?.processId])} enabled={active} onOpen={refreshModels} onModel={changeModel} onThinking={changeThinking} />
+            {usage && <span className="usage" title={usage.title}><span className="sr-only">Context and cost: </span>{usage.text}</span>}
             {busy && !text.trim()
               ? <button key="abort" id="abort" type="button" className="cmd" aria-label="Stop" onClick={abort}><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor" /></svg></button>
               : <button key="send" id="send" type="submit" className="cmd" aria-label={busy ? 'Send follow-up' : 'Send message'} disabled={!active || !text.trim()}><Icon><path d="M12 19V5M5 12l7-7 7 7" /></Icon></button>}

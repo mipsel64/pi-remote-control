@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolStatus, toolSummary } from '../src/parts.js';
+import { buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from '../src/parts.js';
 import { Markdown } from '../src/markdown.js';
 
 const message = message => ({ type: 'message', message });
@@ -185,4 +185,16 @@ test('modelTrigger shows name with effort only when selectable and a descriptive
   assert.deepEqual(modelTrigger(modelPicker({ online: true, model: routed, thinkingLevel: 'off' }, [])),
     { name: 'GPT-5', effort: '', label: 'Model: GPT-5 (openrouter)' });
   assert.deepEqual(modelTrigger(modelPicker({ online: true, model: null }, [])), { name: 'Select model', effort: '', label: 'Select model' });
+});
+
+test('usageSummary totals every reply and gauges the agent-reported context', () => {
+  const reply = usage => message({ role: 'assistant', content: [], stopReason: 'stop', usage });
+  const entries = [reply({ input: 1000, output: 500, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } }),
+    reply({ input: 2000, output: 1000, cacheRead: 47000, cacheWrite: 0, cost: { total: 0.02 } })];
+  assert.deepEqual(usageSummary(entries, { tokens: 50000, contextWindow: 200000 }),
+    { text: '25.0%/200k · $0.030', title: 'Context 50k of 200k · ↑3k ↓1.5k R47k W0 · $0.0300' });
+  assert.equal(usageSummary(entries, { tokens: null, contextWindow: 200000 }).text, '?%/200k · $0.030');
+  assert.equal(usageSummary(entries).text, '$0.030');
+  assert.equal(usageSummary([], { tokens: 0, contextWindow: 1000000 }).text, '0.0%/1M');
+  assert.equal(usageSummary([message({ role: 'user', content: 'hi' })]), null);
 });

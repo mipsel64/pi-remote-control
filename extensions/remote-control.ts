@@ -108,6 +108,15 @@ function gitBranch(cwd: string) {
   catch { return null; }
 }
 
+// The host's own gauge (Pi and omp count differently); tokens is null while unknown, e.g. right after compaction.
+function contextUsage(current: ExtensionContext) {
+  try {
+    const usage = current.getContextUsage?.();
+    if (!usage || !(usage.contextWindow > 0)) return null;
+    return { tokens: typeof usage.tokens === 'number' ? Math.round(usage.tokens) : null, contextWindow: Math.round(usage.contextWindow) };
+  } catch { return null; }
+}
+
 // Notification text for the final reply: its closing question, else its opening paragraph.
 // ponytail: "ends with ?" is the whole question heuristic; misses "let me know…" phrasing.
 function lastReply(entries: ReturnType<ExtensionContext['sessionManager']['getBranch']>) {
@@ -294,6 +303,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     const model = current.model;
     send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
+      context: contextUsage(current),
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
   }
@@ -371,11 +381,12 @@ export default function remoteControl(pi: ExtensionAPI) {
     pi.on(type, (event, current) => {
       if (type === 'ui_prompt_start' || type === 'ui_prompt_end') waiting = type === 'ui_prompt_start';
       if (type === 'agent_start') asking = false;
-      let payload: object = event;
+      const usage = type === 'message_end' || type === 'agent_settled' ? contextUsage(current) : null;
+      let payload: object = usage ? { ...event, contextUsage: usage } : event;
       if (type === 'agent_settled') {
         const reply = lastReply(current.sessionManager.getBranch());
         asking = reply.asking;
-        payload = { ...event, asking, ...(reply.summary ? { summary: reply.summary } : {}) };
+        payload = { ...payload, asking, ...(reply.summary ? { summary: reply.summary } : {}) };
       }
       if (ctx && type === 'message_end' && socket?.readyState === WebSocket.OPEN && 'message' in event && title(current, event.message) !== lastTitle)
         hello(current, event.message);
