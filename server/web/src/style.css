@@ -187,6 +187,7 @@ span.model-trigger, .model-effort, .menu-hint, .menu-heading, .menu-empty, .menu
 button.model-trigger:enabled:hover, .model-trigger[aria-expanded="true"] { background: var(--muted); }
 .model-trigger-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .model-trigger svg { flex: none; width: .75rem; height: .75rem; }
+.usage { flex: none; color: var(--muted-foreground); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cmd { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--muted-foreground); }
 .cmd:enabled { border-color: var(--foreground); background: var(--foreground); color: var(--background); }
 .cmd:enabled:hover { opacity: .85; }

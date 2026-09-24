@@ -1144,6 +1144,7 @@ fn retention_keeps_fifty_sessions_and_never_prunes_online() {
         updated_at: 0,
         model: None,
         thinking_level: None,
+        context: None,
     };
     fs::write(
         sessions.join(format!("{}.json", file_stem("extra"))),
@@ -1175,7 +1176,7 @@ fn model_fields_persist_and_model_commands_are_validated() {
         id,
         &tx,
         &mut None,
-        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","branch":"","busy":false,"model":model,"thinkingLevel":"high","models":[models[0], {"provider":"bad"}, models[1]]})
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","branch":"","busy":false,"model":model,"thinkingLevel":"high","context":{"tokens":null,"contextWindow":200000},"models":[models[0], {"provider":"bad"}, models[1]]})
     ));
     agent.try_recv().unwrap();
     other_rx.try_recv().unwrap();
@@ -1184,6 +1185,29 @@ fn model_fields_persist_and_model_commands_are_validated() {
     assert_eq!(listed["thinkingLevel"], "high");
     assert_eq!(listed["branch"], Value::Null);
     assert!(listed.get("models").is_none());
+    assert_eq!(
+        listed["context"],
+        json!({"tokens":null,"contextWindow":200000})
+    );
+    // A later event carries the agent's fresh gauge; an invalid one keeps the last good value.
+    for usage in [
+        json!({"tokens":50000,"contextWindow":200000}),
+        json!({"tokens":-1,"contextWindow":200000}),
+    ] {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"agent_settled","contextUsage":usage}})
+        ));
+    }
+    while other_rx.try_recv().is_ok() {}
+    while agent.try_recv().is_ok() {}
+    assert_eq!(
+        app.inner.lock().unwrap().sessions["p"].info("p")["context"],
+        json!({"tokens":50000,"contextWindow":200000})
+    );
 
     let (btx, mut brx) = mpsc::unbounded_channel();
     let mut ask = |v: Value| {

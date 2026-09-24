@@ -46,6 +46,7 @@ function context(id = 's1') {
       theme: { fg: (_color, text) => text }, setStatus: (...args) => state.statuses.push(args) },
     sessionManager: { getSessionId: () => state.id, getBranch: () => state.entries },
     isIdle: () => state.idle,
+    getContextUsage: () => state.usage,
     abort: () => { state.aborted++; },
   };
 }
@@ -350,6 +351,9 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
     { type: 'agent_settled', asking: true, summary: 'Should I update ui_prompt_start docs?' });
   assert.deepEqual(await settle(`- All tests pass.\n\n${'x'.repeat(200)}`), { type: 'agent_settled', asking: false, summary: 'All tests pass.' });
   assert.equal((await settle('y'.repeat(200))).summary, `${'y'.repeat(159)}…`);
+  ctx.state.usage = { tokens: 42, contextWindow: 1000, percent: 4.2 };
+  assert.deepEqual((await settle('z')).contextUsage, { tokens: 42, contextWindow: 1000 });
+  delete ctx.state.usage;
   ctx.state.entries = saved;
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'later' }));
   first.ws.send(JSON.stringify({ type: 'abort', sessionId: 's1' }));
@@ -442,6 +446,7 @@ test('hello advertises models and thinking; remote model and thinking changes ar
     }
     throw new Error('Timed out');
   }
+  ctx.state.usage = { tokens: 1234.4, contextWindow: 200000, percent: 0.6 };
   (await load())(pi);
   const connected = once(wss, 'connection');
   pi.command('rc', '', ctx);
@@ -451,6 +456,7 @@ test('hello advertises models and thinking; remote model and thinking changes ar
   await until(() => messages.some(msg => msg.type === 'hello'));
   const hello = messages.find(msg => msg.type === 'hello');
   assert.deepEqual(hello.model, { provider: 'anthropic', id: 'sonnet', name: 'Sonnet', reasoning: true, thinkingLevels: ['off', 'low', 'medium', 'high', 'xhigh'] });
+  assert.deepEqual(hello.context, { tokens: 1234, contextWindow: 200000 });
   assert.equal(hello.thinkingLevel, 'medium');
   assert.deepEqual(hello.models, [
     { provider: 'anthropic', id: 'sonnet', name: 'Sonnet', reasoning: true },

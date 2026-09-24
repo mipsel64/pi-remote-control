@@ -345,6 +345,16 @@ fn model_list(v: &Value) -> Option<Vec<Value>> {
                 .collect()
         })
 }
+// Agent-reported context occupancy; tokens is null while the agent cannot tell (e.g. right after compaction).
+fn context_value(v: &Value) -> Option<Value> {
+    let window = v["contextWindow"].as_u64().filter(|n| *n > 0)?;
+    let tokens = if v["tokens"].is_null() {
+        Value::Null
+    } else {
+        json!(v["tokens"].as_u64()?)
+    };
+    Some(json!({"tokens":tokens,"contextWindow":window}))
+}
 fn send(tx: &Sender, v: Value) {
     let _ = tx.send(Message::Text(v.to_string().into()));
 }
@@ -404,6 +414,7 @@ struct Session {
     updated_at: u64,
     model: Option<Value>,
     thinking_level: Option<String>,
+    context: Option<Value>,
     models: Vec<Value>,
     owner: Option<Uuid>,
     tx: Option<Sender>,
@@ -411,7 +422,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -423,6 +434,7 @@ impl Session {
             updated_at: self.updated_at,
             model: self.model.clone(),
             thinking_level: self.thinking_level.clone(),
+            context: self.context.clone(),
         }
     }
 }
@@ -446,6 +458,8 @@ struct StoredMeta {
     model: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thinking_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -674,6 +688,7 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 updated_at: meta.updated_at,
                 model: meta.model,
                 thinking_level: meta.thinking_level,
+                context: meta.context,
                 models: Vec::new(),
                 owner: None,
                 tx: None,
@@ -1228,6 +1243,7 @@ fn agent_message(
             updated_at,
             model: model_value(&v["model"], true),
             thinking_level: thinking_level(&v["thinkingLevel"]).map(String::from),
+            context: context_value(&v["context"]),
             models: model_list(&v["models"]).unwrap_or_default(),
             owner: Some(id),
             tx: Some(tx.clone()),
@@ -1348,7 +1364,14 @@ fn agent_message(
                     }
                 }
             }
-            if session.updated_at != previous_updated_at {
+            let context = context_value(&v["event"]["contextUsage"])
+                .filter(|context| session.context.as_ref() != Some(context));
+            let context_changed = context.is_some();
+            if context.is_some() {
+                session.context = context;
+                changed = true;
+            }
+            if context_changed || session.updated_at != previous_updated_at {
                 let _ = app.persist.send(Job::Meta(session.stored(p)));
             }
             if changed {

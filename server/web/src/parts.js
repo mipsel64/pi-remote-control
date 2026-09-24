@@ -78,6 +78,29 @@ export function relativeTime(ms, now = Date.now()) {
   return `${Math.floor(minutes / 1440)}d`;
 }
 
+const num = value => Number.isFinite(value) && value > 0 ? value : 0;
+const formatTokens = n => n < 1000 ? String(n) : n < 1e6 ? `${+(n / 1000).toFixed(n < 1e4 ? 1 : 0)}k` : `${+(n / 1e6).toFixed(1)}M`;
+
+// Totals over every assistant reply, like Pi's footer; the context gauge is the agent's own getContextUsage() report.
+export function usageSummary(entries, context) {
+  let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0;
+  for (const entry of entries) {
+    const message = entry?.type === 'message' ? entry.message : null;
+    const usage = message?.role === 'assistant' ? message.usage : null;
+    if (!usage || typeof usage !== 'object') continue;
+    input += num(usage.input); output += num(usage.output); cacheRead += num(usage.cacheRead); cacheWrite += num(usage.cacheWrite);
+    cost += num(usage.cost?.total);
+  }
+  const window = num(context?.contextWindow);
+  const tokens = Number.isFinite(context?.tokens) ? context.tokens : null;
+  const gauge = window ? `${tokens === null ? '?' : (tokens / window * 100).toFixed(1)}%/${formatTokens(window)}` : '';
+  const text = [gauge, cost && `$${cost.toFixed(3)}`].filter(Boolean).join(' · ');
+  if (!text) return null;
+  const title = [window && `Context ${tokens === null ? 'unknown' : formatTokens(tokens)} of ${formatTokens(window)}`,
+    `↑${formatTokens(input)} ↓${formatTokens(output)} R${formatTokens(cacheRead)} W${formatTokens(cacheWrite)}`, cost && `$${cost.toFixed(4)}`].filter(Boolean).join(' · ');
+  return { text, title };
+}
+
 
 export const modelKey = model => `${model.provider}\u0000${model.id}`;
 export function splitModelKey(key) {
