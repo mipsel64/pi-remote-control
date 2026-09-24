@@ -55,7 +55,7 @@ For notifications on iPhone, open the address in Safari, tap **Share → Add to 
 | `/rc close` | Detach and stop reconnecting |
 | `/rc setup` | Show the endpoint and token source (token redacted); edit the client URL |
 
-The Pi footer shows `/rc connected` in green, or a warning while it retries. Attach again after `/new` to add the new session to the list.
+Pi shows a one-time "Remote control connected" notice when `/rc` connects, and the footer shows `/rc connected` in green, or a warning while it retries (automatic reconnects are silent). Attach again after `/new` to add the new session to the list.
 
 ## Configuration
 

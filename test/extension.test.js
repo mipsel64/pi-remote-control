@@ -180,6 +180,9 @@ test('private config attaches current session only on /rc and /rc close disconne
   assert.equal(messages.find(msg => msg.type === 'hello')?.name, 'earlier');
   assert.equal(messages.find(msg => msg.type === 'hello')?.updatedAt, Date.parse(ctx.state.entries[0].timestamp));
   assert.deepEqual(ctx.state.statuses.at(-1), ['rc', '/rc connected']);
+  assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
+  pi.command('rc', '', ctx);
+  assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
   pi.command('rc', 'status', ctx);
   assert.match(ctx.state.notices.at(-1)[0], /connected/);
   const closed = once(ws, 'close');
@@ -225,6 +228,7 @@ test('failed connection warns once, keeps retrying, and /rc close clears the ind
     await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(ctx.state.notices.filter(([, level]) => level === 'warning').length, 1);
   assert.deepEqual(ctx.state.statuses.at(-1), ['rc', '/rc retrying']);
+  assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 0);
   await new Promise(resolve => setTimeout(resolve, 1200));
   assert.equal(ctx.state.notices.filter(([, level]) => level === 'warning').length, 1);
   pi.command('rc', 'status', ctx);
@@ -352,11 +356,13 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   parts = [];
   ctx.state.entries = [{ type: 'message', id: 'old' }, { type: 'message', id: 'next' }];
   const reconnected = once(wss, 'connection');
+  assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
   first.ws.terminate();
   const [again] = await reconnected;
   const reconnectMessages = [];
   again.on('message', raw => reconnectMessages.push(JSON.parse(raw.toString())));
   await until(() => reconnectMessages.some(msg => msg.type === 'snapshot'));
+  assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
   assert.equal(reconnectMessages.find(msg => msg.type === 'hello').processId, hello.processId);
   assert.equal(reconnectMessages.find(msg => msg.type === 'snapshot').entries.length, 2);
   assert.deepEqual(ctx.state.statuses.at(-1), ['rc', '/rc connected']);

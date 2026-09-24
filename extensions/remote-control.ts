@@ -131,6 +131,8 @@ export default function remoteControl(pi: ExtensionAPI) {
   let delay = 1000;
   let settings: ReturnType<typeof connectionSettings> | undefined;
   let failed = false;
+  // Announce only the connection a /rc command opens; automatic reconnects stay silent.
+  let announce = false;
   let lastTitle = '';
 
   function title(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
@@ -155,6 +157,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     if (ctx) status(ctx, 'off');
     ctx = undefined;
     failed = false;
+    announce = false;
     lastTitle = '';
     settings = undefined;
     if (retry) clearTimeout(retry);
@@ -219,7 +222,10 @@ export default function remoteControl(pi: ExtensionAPI) {
         if (socket?.readyState === WebSocket.OPEN) {
           hello(current);
           status(current, 'connected');
-        } else connect();
+        } else {
+          announce = true;
+          connect();
+        }
       } catch (error) {
         stop();
         current.ui.notify(error instanceof Error && error.message.startsWith('Legacy private config found') ? error.message : 'Remote control configuration invalid; check private config or both PI_RC_URL and PI_RC_AGENT_TOKEN', 'error');
@@ -276,6 +282,8 @@ export default function remoteControl(pi: ExtensionAPI) {
       failed = false;
       hello(ctx);
       status(ctx, 'connected');
+      if (announce) ctx.ui.notify('Remote control connected', 'info');
+      announce = false;
     });
     ws.on('message', raw => {
       if (socket !== ws || !ctx) return;
@@ -302,6 +310,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     ws.on('close', () => {
       if (socket !== ws) return;
       socket = undefined;
+      announce = false;
       if (ctx) {
         status(ctx, 'retrying');
         if (!failed) ctx.ui.notify('Remote control connection failed; retrying. Check the server, URL, and agent token', 'warning');
