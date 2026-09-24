@@ -315,7 +315,11 @@ fn raw_utf16_half_chunk_and_limits() {
     let bid = Uuid::new_v4();
     let (tx, _rx) = mpsc::unbounded_channel();
     let (btx, mut brx) = mpsc::unbounded_channel();
-    app.inner.lock().unwrap().browsers.insert(bid, btx);
+    app.inner
+        .lock()
+        .unwrap()
+        .browsers
+        .insert(bid, (String::new(), btx));
     let mut process = None;
     assert!(agent_message(
         &app,
@@ -503,6 +507,87 @@ async fn browser_frame_limit_closes_only_socket() {
         matches!(closed, WsMessage::Close(Some(frame)) if frame.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Size)
     );
     assert_eq!(client.get(url).send().await.unwrap().status(), 200);
+    task.abort();
+}
+
+#[tokio::test]
+async fn logout_revokes_cookie_and_closes_its_sockets() {
+    let (url, task) = fixture().await;
+    let client = Client::new();
+    let origin = "http://127.0.0.1:8787";
+    let login = || async {
+        let res = client
+            .post(format!("{url}/api/login"))
+            .header("Origin", origin)
+            .json(&json!({"password":"admin-test"}))
+            .send()
+            .await
+            .unwrap();
+        let set = res.headers()["set-cookie"].to_str().unwrap();
+        set.split(';').next().unwrap().to_string()
+    };
+    let (a, b) = (login().await, login().await);
+    let status = |cookie: String| {
+        let req = client
+            .get(format!("{url}/api/push-key"))
+            .header("Cookie", cookie);
+        async move { req.send().await.unwrap().status() }
+    };
+    let open = |cookie: &str| {
+        let mut req = format!("{}/ui", url.replace("http", "ws"))
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("Origin", origin.parse().unwrap());
+        req.headers_mut().insert("Cookie", cookie.parse().unwrap());
+        connect_async(req)
+    };
+    let (mut socket_a, _) = open(&a).await.unwrap();
+    let (mut socket_b, _) = open(&b).await.unwrap();
+    next(&mut socket_a).await;
+    next(&mut socket_b).await;
+    let signed_out = |msg: WsMessage| matches!(msg, WsMessage::Close(Some(frame)) if frame.reason == "Signed out");
+
+    let logout = |path: &str, cookie: &str, origin: &str| {
+        client
+            .post(format!("{url}{path}"))
+            .header("Cookie", cookie)
+            .header("Origin", origin)
+            .send()
+    };
+    assert_eq!(
+        logout("/api/logout", &a, "https://evil.invalid")
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let res = logout("/api/logout", &a, origin).await.unwrap();
+    assert_eq!(res.status(), 200);
+    assert!(res.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .starts_with("rc_session=; "));
+    assert!(res.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .contains("Max-Age=0"));
+    assert!(signed_out(socket_a.next().await.unwrap().unwrap()));
+    assert_eq!(status(a.clone()).await, 401);
+    assert!(open(&a).await.is_err());
+    assert_eq!(status(b).await, 200);
+    socket_b
+        .send(WsMessage::Text(
+            json!({"type":"select","processId":"none"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut socket_b).await["message"], "Process is offline");
+    assert_eq!(
+        logout("/api/logout", &a, origin).await.unwrap().status(),
+        401
+    );
     task.abort();
 }
 
@@ -966,7 +1051,7 @@ fn browser_removes_only_offline_sessions_and_their_files() {
         .lock()
         .unwrap()
         .browsers
-        .insert(Uuid::new_v4(), btx.clone());
+        .insert(Uuid::new_v4(), (String::new(), btx.clone()));
     let frame = |rx: &mut mpsc::UnboundedReceiver<Message>| -> Value {
         serde_json::from_str(rx.try_recv().unwrap().to_text().unwrap()).unwrap()
     };
@@ -1082,7 +1167,7 @@ fn model_fields_persist_and_model_commands_are_validated() {
         .lock()
         .unwrap()
         .browsers
-        .insert(Uuid::new_v4(), other);
+        .insert(Uuid::new_v4(), (String::new(), other));
     let model = json!({"provider":"anthropic","id":"sonnet","name":"Sonnet","reasoning":true,"thinkingLevels":["off","high"]});
     let models = json!([{"provider":"anthropic","id":"sonnet","name":"Sonnet","reasoning":true},{"provider":"openai","id":"mini","name":"Mini","reasoning":false}]);
     assert!(agent_message(

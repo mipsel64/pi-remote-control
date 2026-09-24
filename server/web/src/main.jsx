@@ -11,6 +11,28 @@ const pushCapable = location.protocol === 'https:' && 'serviceWorker' in navigat
 const homeScreenHint = needsHomeScreen({ userAgent: navigator.userAgent, platform: navigator.platform, maxTouchPoints: navigator.maxTouchPoints, standalone: navigator.standalone, canNotify, secure: window.isSecureContext });
 const IN_PAGE_KEY = 'prc-notifications';
 const PIN_KEY = 'prc-pinned';
+const SETTINGS_KEY = 'prc-settings';
+const SETTING_OPTIONS = {
+  theme: [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']],
+  font: [['system', 'System'], ['ioskeley', 'Ioskeley'], ['geist', 'Geist']],
+  size: [['90', '90%'], ['100', '100%'], ['115', '115%'], ['130', '130%']],
+};
+const DEFAULT_SETTINGS = { theme: 'system', font: 'system', size: '100' };
+function loadSettings() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY)); } catch { /* Use defaults. */ }
+  return Object.fromEntries(Object.entries(SETTING_OPTIONS).map(([key, options]) =>
+    [key, options.some(([value]) => value === saved?.[key]) ? saved[key] : DEFAULT_SETTINGS[key]]));
+}
+function applySettings({ theme, font, size }) {
+  const root = document.documentElement;
+  Object.assign(root.dataset, { theme, font });
+  // Percent keeps the browser's own default text size as the baseline.
+  root.style.fontSize = `${size}%`;
+  for (const meta of document.querySelectorAll('meta[name="theme-color"]'))
+    meta.content = (theme === 'system' ? meta.media.includes('dark') : theme === 'dark') ? '#000000' : '#ffffff';
+}
+applySettings(loadSettings());
 // Older builds could save in-page mode on HTTPS, which shows "Disable" while nothing is subscribed.
 if (pushCapable) localStorage.removeItem(IN_PAGE_KEY);
 
@@ -23,6 +45,8 @@ const BellOff = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M1
 const More = () => <Icon><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></Icon>;
 const Pin = () => <Icon><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></Icon>;
 const Alert = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" /></Icon>;
+const Close = () => <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>;
+const Gear = () => <Icon><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" /><circle cx="12" cy="12" r="3" /></Icon>;
 const statusIcons = {
   done: <Icon><path d="M20 6 9 17l-5-5" /></Icon>,
   error: <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>,
@@ -194,6 +218,28 @@ function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' 
   </>;
 }
 
+function Choice({ legend, name, value, onChange }) {
+  return <fieldset className="choice"><legend>{legend}</legend><div className="segmented">
+    {SETTING_OPTIONS[name].map(([key, label]) => <label key={key}>
+      <input type="radio" name={name} value={key} checked={value === key} onChange={() => onChange(name, key)} /><span>{label}</span></label>)}
+  </div></fieldset>;
+}
+
+function SettingsDialog({ dialog, settings, onChange, onSignOut }) {
+  return <dialog ref={dialog} className="settings" aria-labelledby="settings-title"
+    onClick={event => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
+    <div className="settings-body">
+      <div className="settings-header"><h2 id="settings-title">Settings</h2>
+        <button type="button" className="icon-button" aria-label="Close settings" onClick={() => dialog.current.close()}><Close /></button></div>
+      <Choice legend="Theme" name="theme" value={settings.theme} onChange={onChange} />
+      <Choice legend="Font" name="font" value={settings.font} onChange={onChange} />
+      <Choice legend="Text size" name="size" value={settings.size} onChange={onChange} />
+      <div className="settings-actions"><span className="settings-label">Account</span>
+        <button type="button" className="settings-button" onClick={onSignOut}>Sign out</button></div>
+    </div>
+  </dialog>;
+}
+
 function App() {
   // Sign-in form messages only; the control view reports through toasts.
   const [status, setStatus] = useState('Connecting…');
@@ -233,6 +279,8 @@ function App() {
   const sidebar = useRef(null);
   const actionsButton = useRef(null);
   const renameDone = useRef(false);
+  const settingsDialog = useRef(null);
+  const [settings, setSettings] = useState(loadSettings);
 
   function publish(next) { data.current = next; setHistory(next); }
   function notify(text, tone = 'success') {
@@ -329,7 +377,7 @@ function App() {
     // Leave horizontal gestures to scrollable content, text fields, and the model menu.
     const onStart = event => {
       const touch = event.touches[0];
-      start = event.touches.length === 1 && phone.matches && sidebar.current && !event.target.closest?.('pre, .table-wrap, input, textarea, select, [role="dialog"]')
+      start = event.touches.length === 1 && phone.matches && sidebar.current && !event.target.closest?.('pre, .table-wrap, input, textarea, select, dialog, [role="dialog"]')
         ? { x: touch.clientX, y: touch.clientY } : null;
     };
     const onEnd = event => {
@@ -567,6 +615,28 @@ function App() {
     } catch (error) { notify(error.message || 'Notifications unavailable', 'error'); }
     finally { setPushBusy(false); }
   }
+  function changeSetting(key, value) {
+    const next = { ...settings, [key]: value };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+    applySettings(next);
+    setSettings(next);
+  }
+  async function signOut() {
+    try {
+      const response = await fetch('/api/logout', { method: 'POST' });
+      if (!response.ok && response.status !== 401) throw new Error();
+    } catch { notify('Sign-out failed', 'error'); return; }
+    settingsDialog.current?.close();
+    const ws = socket.current;
+    socket.current = null;
+    clearTimeout(retry.current);
+    ws?.close();
+    publish(initialHistory);
+    setDrafts({});
+    setDrawer(false);
+    setSignedIn(false);
+    setStatus('Signed out');
+  }
 
   const brand = <div className="brand"><span className="logo" aria-hidden="true">π</span><span className="slash" aria-hidden="true">/</span><h1><span className="sr-only">Pi </span>remote control</h1></div>;
   if (!signedIn) return <main id="login"><form id="login-form" onSubmit={signIn}>
@@ -601,8 +671,12 @@ function App() {
         })}
         {!history.sessions.length && <p className="sidebar-empty">Connected Pi sessions appear here.</p>}
       </nav>
-      {homeScreenHint && <div className="sidebar-footer"><p className="sidebar-hint">For notifications on iPhone or iPad: tap Share, then Add to Home Screen, and open Pi Remote Control from the Home Screen.</p></div>}
+      <div className="sidebar-footer">
+        {homeScreenHint && <p className="sidebar-hint">For notifications on iPhone or iPad: tap Share, then Add to Home Screen, and open Pi Remote Control from the Home Screen.</p>}
+        <button type="button" className="menu-row" aria-haspopup="dialog" onClick={() => settingsDialog.current.showModal()}><Gear /><span className="menu-label">Settings</span></button>
+      </div>
     </aside>
+    <SettingsDialog dialog={settingsDialog} settings={settings} onChange={changeSetting} onSignOut={signOut} />
     {drawer && <div className="backdrop" onClick={closeDrawer} />}
     <main className="conversation" aria-label="Conversation">
       <header className="thread-header">

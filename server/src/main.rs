@@ -358,15 +358,32 @@ fn json_response(status: StatusCode, value: Value) -> Response {
 fn err(status: StatusCode, message: &str) -> Response {
     json_response(status, json!({"error":message}))
 }
-fn cookie_valid(h: &HeaderMap, inner: &mut Inner) -> bool {
-    let candidate = h
-        .get(header::COOKIE)
-        .and_then(|s| s.to_str().ok())
-        .unwrap_or("")
+fn session_cookie(h: &HeaderMap) -> Option<&str> {
+    h.get(header::COOKIE)
+        .and_then(|s| s.to_str().ok())?
         .split(';')
         .map(str::trim)
-        .find_map(|p| p.strip_prefix("rc_session="));
-    let Some(value) = candidate else { return false };
+        .find_map(|p| p.strip_prefix("rc_session="))
+}
+fn set_session_cookie(res: &mut Response, h: &HeaderMap, token: &str, age: u64) {
+    let secure = h
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|origin| origin.starts_with("https:"));
+    res.headers_mut().insert(
+        header::SET_COOKIE,
+        format!(
+            "rc_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={age}{}",
+            if secure { "; Secure" } else { "" }
+        )
+        .parse()
+        .unwrap(),
+    );
+}
+fn cookie_valid(h: &HeaderMap, inner: &mut Inner) -> bool {
+    let Some(value) = session_cookie(h) else {
+        return false;
+    };
     match inner.cookies.get(value) {
         Some(t) if *t > Instant::now() => true,
         _ => {
@@ -731,7 +748,7 @@ struct Keys {
 #[derive(Default)]
 struct Inner {
     sessions: HashMap<String, Session>,
-    browsers: HashMap<Uuid, Sender>,
+    browsers: HashMap<Uuid, (String, Sender)>,
     cookies: HashMap<String, Instant>,
     // Oldest first, so overflow drops the front.
     subscriptions: Vec<Subscription>,
@@ -767,9 +784,24 @@ fn publish(inner: &Inner) {
     broadcast(inner, json!({"type":"sessions","sessions":list}));
 }
 fn broadcast(inner: &Inner, msg: Value) {
-    for tx in inner.browsers.values() {
+    for (_, tx) in inner.browsers.values() {
         send(tx, msg.clone());
     }
+}
+fn close_revoked_browsers(inner: &mut Inner) {
+    let Inner {
+        browsers, cookies, ..
+    } = inner;
+    browsers.retain(|_, (cookie, tx)| {
+        let keep = cookies.contains_key(cookie);
+        if !keep {
+            let _ = tx.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008,
+                reason: "Signed out".into(),
+            })));
+        }
+        keep
+    });
 }
 struct App {
     settings: Settings,
@@ -844,27 +876,23 @@ async fn http(State(app): State<Arc<App>>, req: Request<Body>) -> Response {
             Instant::now() + Duration::from_secs(COOKIE_AGE),
         );
         let mut res = json_response(StatusCode::OK, json!({"ok":true}));
-        res.headers_mut().insert(
-            header::SET_COOKIE,
-            format!(
-                "rc_session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={COOKIE_AGE}{}",
-                if h.get(header::ORIGIN)
-                    .and_then(|value| value.to_str().ok())
-                    .is_some_and(|origin| origin.starts_with("https:"))
-                {
-                    "; Secure"
-                } else {
-                    ""
-                }
-            )
-            .parse()
-            .unwrap(),
-        );
+        set_session_cookie(&mut res, &h, &token, COOKIE_AGE);
         return res;
     }
     if pathname.starts_with("/api/") {
         if !cookie_valid(&h, &mut app.inner.lock().unwrap()) {
             return err(StatusCode::UNAUTHORIZED, "Unauthorized");
+        }
+        if pathname == "/api/logout" && method == Method::POST {
+            let mut inner = app.inner.lock().unwrap();
+            if let Some(token) = session_cookie(&h) {
+                inner.cookies.remove(token);
+            }
+            close_revoked_browsers(&mut inner);
+            drop(inner);
+            let mut res = json_response(StatusCode::OK, json!({"ok":true}));
+            set_session_cookie(&mut res, &h, "", 0);
+            return res;
         }
         if pathname == "/api/push-key" && method == Method::GET {
             return json_response(
@@ -990,13 +1018,17 @@ async fn upgrade(
     if !agent && !browser {
         return err(StatusCode::UNAUTHORIZED, "Unauthorized");
     }
+    let cookie = session_cookie(&h)
+        .filter(|_| browser)
+        .unwrap_or_default()
+        .to_string();
     let limit = if agent { AGENT_LIMIT } else { BROWSER_LIMIT };
     ws.max_message_size(limit)
         .max_frame_size(limit)
-        .on_upgrade(move |socket| socket_loop(socket, app, agent))
+        .on_upgrade(move |socket| socket_loop(socket, app, agent, cookie))
         .into_response()
 }
-async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool) {
+async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: String) {
     let id = Uuid::new_v4();
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
@@ -1010,9 +1042,17 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool) {
     let mut process: Option<String> = None;
     if !agent {
         let mut inner = app.inner.lock().unwrap();
-        inner.browsers.insert(id, tx.clone());
-        let list: Vec<_> = inner.sessions.iter().map(|(p, s)| s.info(p)).collect();
-        send(&tx, json!({"type":"sessions","sessions":list}));
+        // A logout between the upgrade check and here would otherwise miss this socket.
+        if inner.cookies.contains_key(&cookie) {
+            inner.browsers.insert(id, (cookie, tx.clone()));
+            let list: Vec<_> = inner.sessions.iter().map(|(p, s)| s.info(p)).collect();
+            send(&tx, json!({"type":"sessions","sessions":list}));
+        } else {
+            let _ = tx.send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1008,
+                reason: "Signed out".into(),
+            })));
+        }
     }
     while let Some(message) = stream.next().await {
         let Ok(msg) = message else {
@@ -1055,6 +1095,10 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool) {
                 break;
             }
         } else {
+            // A client can ignore the sign-out close frame; stop obeying it once its cookie is revoked.
+            if !app.inner.lock().unwrap().browsers.contains_key(&id) {
+                break;
+            }
             browser_message(&app, &tx, &value);
         }
     }
@@ -1115,7 +1159,7 @@ fn raw_chunk(app: &App, id: Uuid, process: Option<&str>, text: &str) -> bool {
     }
     let frame = format!("{{\"type\":\"snapshot_chunk\",\"processId\":{},\"sessionId\":{},\"snapshotId\":{},\"index\":{},\"total\":{},\"data\":{}}}",
         json!(chunk.process_id), json!(chunk.session_id), json!(chunk.snapshot_id), chunk.index, chunk.total, chunk.data.get());
-    for tx in inner.browsers.values() {
+    for (_, tx) in inner.browsers.values() {
         let _ = tx.send(Message::Text(frame.clone().into()));
     }
     buffer_chunk(
