@@ -360,6 +360,22 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   await until(() => pi.prompts.length === 2 && ctx.state.aborted === 1);
   assert.deepEqual(pi.prompts[1], ['later', { deliverAs: 'followUp' }]);
   assert.equal(ctx.state.aborted, 1);
+  const queue = async () => (await first.next(msg => msg.type === 'event' && msg.event.type === 'queue_update')).event.queued;
+  assert.deepEqual(await queue(), ['later']);
+  const preview = `aa${'😀'.repeat(98)}…`;
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: `  aa${'😀'.repeat(130)} tail\n` }));
+  assert.deepEqual(await queue(), ['later', preview]);
+  const helloQueue = async () => {
+    pi.emit('model_select', ctx, { type: 'model_select', model: sonnet, previousModel: sonnet, source: 'set' });
+    return (await first.next(msg => msg.type === 'hello')).queued;
+  };
+  assert.deepEqual(await helloQueue(), ['later', preview]);
+  pi.emit('message_start', ctx, { type: 'message_start', message: { role: 'user', content: [{ type: 'text', text: 'later' }] } });
+  assert.deepEqual(await queue(), [preview]);
+  pi.emit('message_start', ctx, { type: 'message_start', message: { role: 'user', content: 'typed in the terminal' } });
+  assert.deepEqual(await helloQueue(), [preview]);
+  pi.emit('agent_settled', ctx);
+  assert.deepEqual(await queue(), []);
   ctx.state.entries.push({ type: 'message', id: 'next' });
   pi.emit('session_tree', ctx);
   assert.equal((await first.next(msg => msg.type === 'snapshot')).entries.length, 2);

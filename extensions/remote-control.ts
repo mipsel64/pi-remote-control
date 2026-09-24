@@ -168,6 +168,23 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Tracked while disconnected too, so a reconnect during an open dialog still reports it.
   let waiting = false;
   let asking = false;
+  // Kept across /rc close: Pi still runs the follow-ups and the events below keep this in sync.
+  let queued: string[] = [];
+  // Server cap is 256 UTF-16 units; cut on code points so a surrogate pair is never split.
+  const previews = () => queued.map(text => {
+    const flat = text.replace(/\s+/g, ' ').trim();
+    if (flat.length <= 200) return flat;
+    let cut = '';
+    for (const char of flat) {
+      if (cut.length + char.length > 199) break;
+      cut += char;
+    }
+    return `${cut}…`;
+  });
+  function setQueued(current: ExtensionContext, next: string[]) {
+    queued = next;
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'queue_update', queued: previews() } });
+  }
 
   function title(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
     const name = pi.getSessionName();
@@ -304,6 +321,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
       context: contextUsage(current),
+      queued: previews(),
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
   }
@@ -330,7 +348,9 @@ export default function remoteControl(pi: ExtensionAPI) {
       if (command.type === 'history') snapshot(current);
       else if (command.type === 'models') send({ type: 'models', processId: entryId(current), sessionId: command.sessionId, models: modelList(current) });
       else if (command.type === 'prompt' && typeof command.text === 'string' && command.text.trim() && Buffer.byteLength(command.text) <= 16 * 1024) {
-        pi.sendUserMessage(command.text, current.isIdle() ? undefined : { deliverAs: 'followUp' });
+        const idle = current.isIdle();
+        pi.sendUserMessage(command.text, idle ? undefined : { deliverAs: 'followUp' });
+        if (!idle) setQueued(current, [...queued, command.text]);
       } else if (command.type === 'abort' && !current.isIdle()) current.abort();
       else if (command.type === 'set_model' && typeof command.provider === 'string' && typeof command.modelId === 'string') {
         const model = current.modelRegistry.find(command.provider, command.modelId);
@@ -358,6 +378,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, current) => {
+    queued = [];
     if (!ctx) return;
     ctx = current;
     if (socket?.readyState === WebSocket.OPEN) {
@@ -393,6 +414,14 @@ export default function remoteControl(pi: ExtensionAPI) {
       // Tools may switch branches during a run.
       if (ctx && type === 'agent_settled' && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
       send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
+      if (type === 'message_start' && 'message' in event && event.message?.role === 'user') {
+        const content = (event.message as { content?: unknown }).content;
+        const text = typeof content === 'string' ? content : Array.isArray(content) ? content.filter(part => part?.type === 'text').map(part => part.text).join('') : '';
+        const index = queued.indexOf(text);
+        if (index >= 0) setQueued(current, queued.filter((_, i) => i !== index));
+      }
+      // A settled run has no queued continuation left; anything else was returned to Pi's editor.
+      if (type === 'agent_settled' && queued.length) setQueued(current, []);
     });
   }
   pi.on('session_shutdown', stop);

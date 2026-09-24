@@ -45,6 +45,7 @@ const MAX_SNAPSHOT_CHUNKS: u64 = 256;
 const MAX_SNAPSHOT_BYTES: usize = 64 << 20;
 const MAX_MODELS: usize = 2000;
 const MAX_SUBSCRIPTIONS: usize = 100;
+const MAX_QUEUED: usize = 20;
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 type Sender = mpsc::UnboundedSender<Message>;
 
@@ -319,6 +320,17 @@ fn valid_id(v: &Value) -> Option<&str> {
 fn short_str(v: &Value) -> Option<&str> {
     v.as_str().filter(|s| s.encode_utf16().count() <= 256)
 }
+// Previews of remote follow-ups still waiting in Pi's queue.
+fn queued_list(v: &Value) -> Vec<String> {
+    v.as_array().map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .filter_map(short_str)
+            .take(MAX_QUEUED)
+            .map(String::from)
+            .collect()
+    })
+}
 fn thinking_level(v: &Value) -> Option<&str> {
     v.as_str().filter(|s| THINKING_LEVELS.contains(s))
 }
@@ -415,6 +427,7 @@ struct Session {
     model: Option<Value>,
     thinking_level: Option<String>,
     context: Option<Value>,
+    queued: Vec<String>,
     models: Vec<Value>,
     owner: Option<Uuid>,
     tx: Option<Sender>,
@@ -422,7 +435,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -689,6 +702,7 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 model: meta.model,
                 thinking_level: meta.thinking_level,
                 context: meta.context,
+                queued: Vec::new(),
                 models: Vec::new(),
                 owner: None,
                 tx: None,
@@ -1126,6 +1140,7 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
                     s.owner = None;
                     s.tx = None;
                     s.pending = None;
+                    s.queued.clear();
                     publish(&inner);
                 }
             }
@@ -1244,6 +1259,7 @@ fn agent_message(
             model: model_value(&v["model"], true),
             thinking_level: thinking_level(&v["thinkingLevel"]).map(String::from),
             context: context_value(&v["context"]),
+            queued: queued_list(&v["queued"]),
             models: model_list(&v["models"]).unwrap_or_default(),
             owner: Some(id),
             tx: Some(tx.clone()),
@@ -1330,6 +1346,7 @@ fn agent_message(
                     "agent_settled",
                     "ui_prompt_start",
                     "ui_prompt_end",
+                    "queue_update",
                 ]
                 .contains(&v["event"]["type"].as_str().unwrap_or("")) =>
         {
@@ -1338,6 +1355,10 @@ fn agent_message(
             let previous_updated_at = session.updated_at;
             if kind == "ui_prompt_start" || kind == "ui_prompt_end" {
                 session.waiting = kind == "ui_prompt_start";
+                changed = true;
+            }
+            if kind == "queue_update" {
+                session.queued = queued_list(&v["event"]["queued"]);
                 changed = true;
             }
             if kind == "agent_start" || kind == "agent_settled" {

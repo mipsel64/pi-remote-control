@@ -208,6 +208,20 @@ async fn auth_relay_reconnect_and_embedded_assets() {
         next(&mut second_agent).await,
         json!({"type":"prompt","sessionId":"other","text":"separate"})
     );
+    second_agent.send(WsMessage::Text(json!({"type":"event","processId":"p2","sessionId":"other","event":{"type":"queue_update","queued":["separate"]}}).to_string().into())).await.unwrap();
+    let queued = |frame: Value| {
+        frame["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["processId"] == "p2")
+            .unwrap()["queued"]
+            .clone()
+    };
+    assert_eq!(queued(next(&mut browser).await), json!(["separate"]));
+    assert_eq!(next(&mut browser).await["event"]["type"], "queue_update");
+    second_agent.close(None).await.unwrap();
+    assert_eq!(queued(next(&mut browser).await), json!([]));
     task.abort();
 }
 #[tokio::test]
@@ -860,6 +874,42 @@ fn ui_prompt_events_mark_session_waiting() {
     assert_eq!(event(json!({"type":"agent_settled","asking":true})), true);
     go_offline(&app, "p");
     assert_eq!(waiting(), false);
+}
+
+#[test]
+fn queued_follow_ups_are_validated_and_bounded() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let queued = || app.inner.lock().unwrap().sessions["p"].info("p")["queued"].clone();
+    assert_eq!(queued(), json!([]));
+    let long = "x".repeat(257);
+    let many: Vec<_> = (0..=MAX_QUEUED).map(|i| i.to_string()).collect();
+    for (list, expected) in [
+        (
+            json!(["fix tests", 1, long, "then clippy"]),
+            json!(["fix tests", "then clippy"]),
+        ),
+        (json!(many), json!(many[..MAX_QUEUED])),
+        (json!("not a list"), json!([])),
+    ] {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"queue_update","queued":list}})
+        ));
+        assert_eq!(queued(), expected);
+    }
+    assert!(agent_message(
+        &app,
+        id,
+        &tx,
+        &mut Some("p".into()),
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":true,"queued":["after reconnect"]})
+    ));
+    assert_eq!(queued(), json!(["after reconnect"]));
 }
 
 #[test]
