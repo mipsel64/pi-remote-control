@@ -57,6 +57,19 @@ test('buildThread maps special roles and degrades unknown shapes to text', () =>
   assert.deepEqual(buildThread(undefined, null), []);
 });
 
+test('buildThread gives extension messages a one-line summary', () => {
+  const [event, note, plain] = buildThread([
+    { type: 'custom_message', customType: 'ad-process:notification', display: true,
+      content: '<process_event>\n  <summary>Process "x" ended.</summary>\n  <exit_code>0</exit_code>\n</process_event>' },
+    { type: 'custom_message', customType: 'reminder', display: true, content: 'Run tests.\nThen build.' },
+    { type: 'custom_message', customType: 'plan', display: true, content: ' step ' }
+  ]);
+  assert.deepEqual([event.label, event.summary], ['ad-process:notification', 'Process "x" ended.']);
+  assert.match(event.text, /<exit_code>0<\/exit_code>/);
+  assert.equal(note.summary, 'Run tests.');
+  assert.equal(plain.summary, 'step');
+});
+
 test('buildThread renders raw Pi compaction and branch-summary entries', () => {
   const items = buildThread([{ type: 'compaction', summary: 'earlier work' }, { type: 'branch_summary', summary: 'other path' }, { type: 'label', label: 'x' }]);
   assert.deepEqual(items.map(item => [item.kind, item.label, item.text]),

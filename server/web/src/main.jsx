@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
 import { buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary } from './parts.js';
 import { Markdown as Text } from './markdown.js';
+import '@fontsource-variable/geist-mono';
 import './style.css';
 
 const canNotify = 'Notification' in window && window.isSecureContext;
@@ -16,17 +17,12 @@ if (pushCapable) localStorage.removeItem(IN_PAGE_KEY);
 const Icon = ({ children, className }) => <svg className={className} viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
   strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{children}</svg>;
 const Chevron = () => <Icon className="chevron"><path d="m9 18 6-6-6-6" /></Icon>;
-const Brain = () => <Icon><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" /><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" /><path d="M12 5v13" /></Icon>;
 const Down = () => <Icon><path d="m6 9 6 6 6-6" /></Icon>;
 const Bell = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" /></Icon>;
 const BellOff = () => <Icon><path d="M10.268 21a2 2 0 0 0 3.464 0" /><path d="M17 17H4a1 1 0 0 1-.74-1.673C4.59 13.956 6 12.499 6 8a6 6 0 0 1 .258-1.742" /><path d="m2 2 20 20" /><path d="M8.668 3.01A6 6 0 0 1 18 8c0 2.687.77 4.653 1.707 6.05" /></Icon>;
 const More = () => <Icon><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></Icon>;
 const Pin = () => <Icon><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></Icon>;
-const Trash = () => <Icon><path d="M3 6h18" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></Icon>;
-const Folder = () => <Icon><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>;
-const Branch = () => <Icon><path d="M6 3v12" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><path d="M18 9a9 9 0 0 1-9 9" /></Icon>;
 const Alert = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" /></Icon>;
-const Pencil = () => <Icon><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></Icon>;
 const statusIcons = {
   done: <Icon><path d="M20 6 9 17l-5-5" /></Icon>,
   error: <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>,
@@ -36,7 +32,7 @@ const statusIcons = {
 const statusLabels = { done: 'completed', error: 'failed', pending: 'running', incomplete: 'no result' };
 
 function Terminal({ command, output, exitCode }) {
-  return <pre className="terminal"><span className="terminal-prompt">$ </span>{command}{output ? `\n${output}` : ''}
+  return <pre className="terminal">$ <span className="terminal-command">{command}</span>{output ? `\n${output}` : ''}
     {Number.isFinite(exitCode) && exitCode !== 0 && <span className="terminal-exit">{`\nexit ${exitCode}`}</span>}</pre>;
 }
 
@@ -45,13 +41,13 @@ function ToolCard({ call, live }) {
   const summary = toolSummary(call.name, call.arguments);
   const output = call.result ? contentText(call.result.content) : '';
   return <details className={`tool ${status}`}>
-    <summary>{statusIcons[status]}<span className="tool-title">Used tool: <b>{call.name}</b></span>
+    <summary>{statusIcons[status]}<span className="tool-title"><b>{call.name}</b></span>
       {summary && <span className="tool-summary">{summary}</span>}<span className="sr-only">, {statusLabels[status]}</span><Chevron /></summary>
     <div className="tool-body">{isBashTool(call.name)
       ? <Terminal command={String(call.arguments?.command ?? '')} output={output} />
       : <>
         {call.arguments !== undefined && <pre className="mono">{JSON.stringify(call.arguments, null, 2)}</pre>}
-        {call.result && <><div className="tool-label">Result:</div><pre className="mono">{output || '(no output)'}</pre></>}
+        {call.result && <><div className="tool-label">result</div><pre className="mono">{output || '(no output)'}</pre></>}
       </>}</div>
   </details>;
 }
@@ -65,7 +61,7 @@ function Item({ item, live }) {
   if (item.kind === 'assistant') return <div className="msg assistant">
     {item.parts.map((part, index) => part.type === 'text' ? <Text key={index} text={part.text} /> :
       part.type === 'thinking' ? <details key={index} className="reasoning" open={item.streaming}>
-        <summary><Brain /><span className={item.streaming ? 'shimmer' : undefined}>Reasoning</span><Chevron /></summary>
+        <summary><span className={item.streaming ? 'shimmer' : undefined}>thinking</span><Chevron /></summary>
         <div className="reasoning-body"><Text text={part.text} /></div></details> :
       part.type === 'toolCall' ? <ToolCard key={index} call={part} live={live || item.streaming} /> :
       <span key={index} className="chip">[image]</span>)}
@@ -75,7 +71,9 @@ function Item({ item, live }) {
   if (item.kind === 'tool') return <ToolCard call={item.call} live={false} />;
   if (item.kind === 'bash') return <Terminal command={item.command} output={item.output} exitCode={item.exitCode} />;
   if (item.kind === 'summary') return <details className="divider-card"><summary><span>{item.label}</span><Chevron /></summary><div className="card-body"><Text text={item.text} /></div></details>;
-  return <div className="custom-card"><div className="card-label">{item.label}</div><div className="plain">{item.text}</div></div>;
+  const line = <><span className="card-label">{item.label}</span><span className="tool-summary">{item.summary}</span></>;
+  return item.summary === item.text.trim() ? <div className="custom-card"><div className="custom-line">{line}</div></div>
+    : <details className="custom-card"><summary>{line}<Chevron /></summary><div className="plain">{item.text}</div></details>;
 }
 
 const Back = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
@@ -142,7 +140,7 @@ function ModelMenu({ picker, enabled, onOpen, onModel, onThinking }) {
   return <>
     <button ref={trigger} type="button" className="model-trigger" aria-label={label} title={label} aria-haspopup="dialog" aria-expanded={open}
       aria-controls={open ? id : undefined} disabled={!enabled} onClick={toggle} onKeyDown={event => { if (event.key === 'Escape' && open) { event.preventDefault(); setOpen(false); } }}>
-      <span className="model-trigger-text" aria-hidden="true">{name}{effort && <span className="model-effort"> {effort}</span>}</span><Down /></button>
+      <span className="model-trigger-text" aria-hidden="true">{name}{effort && <span className="model-effort"> · {effort}</span>}</span><Down /></button>
     {open && <div ref={panel} id={id} className="model-menu" role="dialog" aria-label="Model settings" onKeyDown={onKey}
       onBlur={event => { if (event.relatedTarget && event.relatedTarget !== trigger.current && !event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
       {view === 'main' ? <>
@@ -171,8 +169,8 @@ function ModelMenu({ picker, enabled, onOpen, onModel, onThinking }) {
 }
 
 function Location({ session }) {
-  return <span className="location" title={session.cwd}><Folder /><span className="location-text">{folderName(session.cwd)}</span>
-    {session.branch && <><Branch /><span className="location-text">{session.branch}</span></>}</span>;
+  return <span className="location" title={session.cwd}><span className="location-text">{folderName(session.cwd)}</span>
+    {session.branch && <><span aria-hidden="true">·</span><span className="location-text">{session.branch}</span></>}</span>;
 }
 
 function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' }) {
@@ -191,7 +189,7 @@ function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' 
     <button ref={buttonRef} type="button" className={`icon-button actions-trigger ${className}`} popoverTarget={id} aria-label={label} title="Session actions" onClick={place}><More /></button>
     <div ref={panel} id={id} popover="auto" className="session-menu">
       {actions.map(action => <button key={action.label} type="button" className={`menu-row${action.danger ? ' danger' : ''}`}
-        onClick={() => { panel.current.hidePopover(); action.run(); }}>{action.icon}<span className="menu-label">{action.label}</span></button>)}
+        onClick={() => { panel.current.hidePopover(); action.run(); }}><span className="menu-label">{action.label}</span></button>)}
     </div>
   </>;
 }
@@ -203,7 +201,9 @@ function App() {
   const toastTimer = useRef(null);
   const [signedIn, setSignedIn] = useState(false);
   const [history, setHistory] = useState(initialHistory);
-  const [text, setText] = useState('');
+  const [drafts, setDrafts] = useState({});
+  const text = drafts[history.selected] ?? '';
+  function setText(value) { const id = data.current.selected; setDrafts(all => ({ ...all, [id]: value })); }
   const [pushKey, setPushKey] = useState(null);
   const [subscribed, setSubscribed] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -257,7 +257,13 @@ function App() {
     setDrawer(false);
     return true;
   }
-  function select(processId) { publish(selectSession(data.current, processId)); sendSelect(processId); if (drawer) closeDrawer(); }
+  function select(processId) {
+    publish(selectSession(data.current, processId));
+    sendSelect(processId);
+    if (drawer) closeDrawer();
+    // Touch keyboards would cover the conversation that was just opened.
+    if (matchMedia('(pointer: fine)').matches) requestAnimationFrame(() => input.current?.focus());
+  }
   function openDrawer() { setDrawer(true); requestAnimationFrame(() => sidebar.current?.querySelector('button')?.focus()); }
   function closeDrawer() { setDrawer(false); menu.current?.focus(); }
   function scrollToBottom() {
@@ -490,11 +496,11 @@ function App() {
   }
   const displayName = session => (history.optimistic[session.processId]?.name ?? session.name) || DEFAULT_NAME;
   const sessionActions = session => [
-    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
-    session.cwd && { label: 'Copy full path', icon: <Folder />, run: () => copy(session.cwd, 'Path') },
-    session.branch && { label: 'Copy current branch', icon: <Branch />, run: () => copy(session.branch, 'Branch') },
-    { label: pinned.includes(session.sessionId) ? 'Unpin' : 'Pin', icon: <Pin />, run: () => togglePin(session.sessionId) },
-    socketOpen && !session.online && { label: 'Remove', icon: <Trash />, danger: true, run: () => removeSession(session) },
+    socketOpen && session.online && { label: 'Rename', run: () => startRename(session) },
+    session.cwd && { label: 'Copy full path', run: () => copy(session.cwd, 'Path') },
+    session.branch && { label: 'Copy current branch', run: () => copy(session.branch, 'Branch') },
+    { label: pinned.includes(session.sessionId) ? 'Unpin' : 'Pin', run: () => togglePin(session.sessionId) },
+    socketOpen && !session.online && { label: 'Remove', danger: true, run: () => removeSession(session) },
   ].filter(Boolean);
   function finishRename(value) {
     const current = currentSession(data.current);
@@ -562,11 +568,11 @@ function App() {
     finally { setPushBusy(false); }
   }
 
-  const brand = <div className="brand"><span className="logo" aria-hidden="true">π</span><h1>Pi Remote Control</h1></div>;
+  const brand = <div className="brand"><span className="logo" aria-hidden="true">π</span><span className="slash" aria-hidden="true">/</span><h1><span className="sr-only">Pi </span>remote control</h1></div>;
   if (!signedIn) return <main id="login"><form id="login-form" onSubmit={signIn}>
-    {brand}<h2>Welcome back</h2><p>Sign in to your private Pi sessions.</p><label htmlFor="password">Admin password</label>
+    {brand}<p>Sign in to your private Pi sessions.</p><label htmlFor="password">password</label>
     <input id="password" name="password" type="password" autoComplete="current-password" required />
-    <button>Sign in</button><p id="status" role="status">{status}</p>
+    <button>sign in</button><p id="status" role="status">{status}</p>
   </form></main>;
 
   const empty = !item ? <div className="empty"><h2>Nothing to show yet</h2><p>{notice}</p></div> :
@@ -631,8 +637,9 @@ function App() {
           <div className="composer-actions">
             {/* Remounting on session switch, offline, or socket drop closes the menu. */}
             <ModelMenu key={renameKey} picker={modelPicker(item, history.models[item?.processId], history.optimistic[item?.processId])} enabled={active} onOpen={refreshModels} onModel={changeModel} onThinking={changeThinking} />
-            {busy && <button id="abort" type="button" className="round stop" aria-label="Stop" onClick={abort}><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor" /></svg></button>}
-            <button id="send" type="submit" className="round send" aria-label="Send message" disabled={!active || !text.trim()}><Icon><path d="M12 19V5M5 12l7-7 7 7" /></Icon></button>
+            {busy && !text.trim()
+              ? <button key="abort" id="abort" type="button" className="cmd" aria-label="Stop" onClick={abort}><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor" /></svg></button>
+              : <button key="send" id="send" type="submit" className="cmd" aria-label={busy ? 'Send follow-up' : 'Send message'} disabled={!active || !text.trim()}><Icon><path d="M12 19V5M5 12l7-7 7 7" /></Icon></button>}
           </div>
         </form>
       </div>

@@ -50,11 +50,8 @@ async fn auth_relay_reconnect_and_embedded_assets() {
     assert!(root.text().await.unwrap().contains("/assets/index-"));
     let worker = client.get(format!("{url}/sw.js")).send().await.unwrap();
     assert_eq!(worker.status(), 200);
-    assert!(worker
-        .text()
-        .await
-        .unwrap()
-        .contains("const PRECACHE = [\"/assets/index-"));
+    let worker = worker.text().await.unwrap();
+    assert!(worker.contains("const PRECACHE = [\"/assets/") && worker.contains("\"/assets/index-"));
     assert_eq!(
         client
             .get(format!("{url}/%2e%2e/DESIGN.md"))
