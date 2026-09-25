@@ -78,6 +78,14 @@ export function relativeTime(ms, now = Date.now()) {
   return `${Math.floor(minutes / 1440)}d`;
 }
 
+export function backgroundSummary(items) {
+  const count = (kind, one, many) => {
+    const n = items.filter(item => item.kind === kind).length;
+    return n ? `${n} ${n === 1 ? one : many}` : '';
+  };
+  return `${[count('shell', 'shell', 'shells'), count('agent', 'subagent', 'subagents')].filter(Boolean).join(' \u00b7 ')} running`;
+}
+
 const num = value => Number.isFinite(value) && value > 0 ? value : 0;
 const formatTokens = n => n < 1000 ? String(n) : n < 1e6 ? `${+(n / 1000).toFixed(n < 1e4 ? 1 : 0)}k` : `${+(n / 1e6).toFixed(1)}M`;
 

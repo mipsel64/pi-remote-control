@@ -219,9 +219,25 @@ async fn auth_relay_reconnect_and_embedded_assets() {
             .clone()
     };
     assert_eq!(queued(next(&mut browser).await), json!(["separate"]));
-    assert_eq!(next(&mut browser).await["event"]["type"], "queue_update");
+    second_agent.send(WsMessage::Text(json!({"type":"event","processId":"p2","sessionId":"other","event":{"type":"background_update","background":[{"kind":"shell","id":"ci","label":"ci","detail":"gh run watch","startedAt":1}]}}).to_string().into())).await.unwrap();
+    let frame = next(&mut browser).await;
+    let p2 = |frame: &Value| {
+        frame["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|session| session["processId"] == "p2")
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(p2(&frame)["background"][0]["label"], "ci");
+    // Only the sanitized sessions frames reach browsers, never the agent's raw list events.
     second_agent.close(None).await.unwrap();
-    assert_eq!(queued(next(&mut browser).await), json!([]));
+    let offline = next(&mut browser).await;
+    assert_eq!(offline["type"], "sessions");
+    let offline = p2(&offline);
+    assert_eq!(offline["queued"], json!([]));
+    assert_eq!(offline["background"], json!([]));
     task.abort();
 }
 #[tokio::test]
@@ -910,6 +926,54 @@ fn queued_follow_ups_are_validated_and_bounded() {
         &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":true,"queued":["after reconnect"]})
     ));
     assert_eq!(queued(), json!(["after reconnect"]));
+}
+
+#[test]
+fn background_items_are_validated_and_bounded() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let background = || app.inner.lock().unwrap().sessions["p"].info("p")["background"].clone();
+    assert_eq!(background(), json!([]));
+    let shell = json!({"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","startedAt":1000,"extra":"dropped"});
+    let many: Vec<_> = (0..=MAX_BACKGROUND)
+        .map(|i| json!({"kind":"agent","id":i.to_string(),"label":"reviewer","detail":"","startedAt":null}))
+        .collect();
+    for (list, expected) in [
+        (
+            json!([
+                shell,
+                {"kind":"daemon","id":"x","label":"x"},
+                {"kind":"shell","id":"","label":"x"},
+                {"kind":"shell","id":"x","label":""},
+                {"kind":"shell","id":"x","label":"x","detail":"y".repeat(257)},
+                "not an item",
+            ]),
+            json!([
+                {"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","startedAt":1000},
+                {"kind":"shell","id":"x","label":"x","detail":"","startedAt":null},
+            ]),
+        ),
+        (json!(many), json!(many[..MAX_BACKGROUND])),
+        (json!({"kind":"shell"}), json!([])),
+    ] {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"background_update","background":list}})
+        ));
+        assert_eq!(background(), expected);
+    }
+    assert!(agent_message(
+        &app,
+        id,
+        &tx,
+        &mut Some("p".into()),
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false,"background":[{"kind":"agent","id":"fleet-1","label":"worker"}]})
+    ));
+    assert_eq!(background()[0]["label"], "worker");
 }
 
 #[test]

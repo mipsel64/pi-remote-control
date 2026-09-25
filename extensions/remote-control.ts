@@ -117,6 +117,46 @@ function contextUsage(current: ExtensionContext) {
   } catch { return null; }
 }
 
+// Server cap is 256 UTF-16 units; cut on code points so a surrogate pair is never split.
+function preview(text: string, max = 200) {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  let cut = '';
+  for (const char of flat) {
+    if (cut.length + char.length > max - 1) break;
+    cut += char;
+  }
+  return `${cut}…`;
+}
+
+type Fields = Record<string, unknown>;
+type Background = { kind: 'shell' | 'agent'; id: string; label: string; detail: string; startedAt: number | null };
+const MAX_BACKGROUND = 20;
+const LIVE_PROCESS_STATUSES = ['running', 'terminating', 'terminate_timeout'];
+const startTime = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0 ? value as number : null;
+
+// pi-processes `processes:request:list` rows; its protocol is internal to that package, so validate every field.
+function shellItems(list: unknown): Background[] {
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((row: Fields) => {
+    if (!row || typeof row.id !== 'string' || !row.id || typeof row.command !== 'string' || !LIVE_PROCESS_STATUSES.includes(row.status as string)) return [];
+    const name = typeof row.name === 'string' && row.name.trim() ? row.name : row.command;
+    return [{ kind: 'shell' as const, id: row.id, label: preview(name, 80), detail: preview(row.command), startedAt: startTime(row.startTime) }];
+  });
+}
+
+// pi-subagents RPC `status` reply; `data.fleet` v1 is its documented display DTO.
+function agentItems(reply: unknown): Background[] {
+  const fleet = (reply as Fields)?.success === true ? ((reply as { data?: Fields }).data?.fleet as Fields | undefined) : undefined;
+  if (fleet?.version !== 1 || !Array.isArray(fleet.entries)) return [];
+  return fleet.entries.flatMap((entry: Fields) => {
+    if (!entry || typeof entry.key !== 'string' || !entry.key || typeof entry.agent !== 'string' || !entry.agent.trim()) return [];
+    const label = typeof entry.role === 'string' && entry.role ? `${entry.agent} · ${entry.role}` : entry.agent;
+    const detail = [entry.goal, entry.model].filter(part => typeof part === 'string' && part).join(' · ');
+    return [{ kind: 'agent' as const, id: entry.key, label: preview(label, 80), detail: preview(detail), startedAt: startTime(entry.startedAt) }];
+  });
+}
+
 // Notification text for the final reply: its closing question, else its opening paragraph.
 // ponytail: "ends with ?" is the whole question heuristic; misses "let me know…" phrasing.
 function lastReply(entries: ReturnType<ExtensionContext['sessionManager']['getBranch']>) {
@@ -173,17 +213,61 @@ export default function remoteControl(pi: ExtensionAPI) {
   let queued: string[] = [];
   let stopped = false;
   let runSignal: AbortSignal | undefined;
-  // Server cap is 256 UTF-16 units; cut on code points so a surrogate pair is never split.
-  const previews = () => queued.map(text => {
-    const flat = text.replace(/\s+/g, ' ').trim();
-    if (flat.length <= 200) return flat;
-    let cut = '';
-    for (const char of flat) {
-      if (cut.length + char.length > 199) break;
-      cut += char;
+  const previews = () => queued.map(text => preview(text));
+  // Filled from other extensions' pi.events protocols; a list stays empty when its extension is not loaded.
+  let shells: Background[] = [];
+  let agents: Background[] = [];
+  let sentBackground = '[]';
+  let agentsRequest: string | undefined;
+  let agentsStale = false;
+  // Each kind keeps half the slots when both overflow, so many shells never hide every subagent.
+  const background = () => {
+    const agentSlots = Math.min(agents.length, Math.max(MAX_BACKGROUND / 2, MAX_BACKGROUND - shells.length));
+    return [...shells.slice(0, MAX_BACKGROUND - agentSlots), ...agents.slice(0, agentSlots)];
+  };
+  function publishBackground() {
+    const list = background();
+    const json = JSON.stringify(list);
+    if (!ctx || json === sentBackground) return;
+    sentBackground = json;
+    send({ type: 'event', processId: entryId(ctx), sessionId: ctx.sessionManager.getSessionId(), event: { type: 'background_update', background: list } });
+  }
+  function refreshShells() {
+    let list: unknown;
+    // pi-processes answers synchronously inside emit.
+    pi.events?.emit('processes:request:list', { reply: (processes: unknown) => { list = processes; } });
+    shells = shellItems(list);
+  }
+  // One request in flight; changes that arrive meanwhile trigger one more.
+  function refreshAgents() {
+    if (!pi.events) return;
+    if (agentsRequest) {
+      agentsStale = true;
+      return;
     }
-    return `${cut}…`;
-  });
+    const requestId = randomUUID();
+    agentsRequest = requestId;
+    const done = (reply?: unknown) => {
+      if (agentsRequest !== requestId) return;
+      agentsRequest = undefined;
+      off();
+      clearTimeout(timer);
+      if (reply !== undefined || agents.length) {
+        // A timeout means pi-subagents stopped answering, so its last list is no longer true.
+        agents = reply === undefined ? [] : agentItems(reply);
+        publishBackground();
+      }
+      if (agentsStale) {
+        agentsStale = false;
+        refreshAgents();
+      }
+    };
+    const off = pi.events.on(`subagents:rpc:v1:reply:${requestId}`, done);
+    // No reply means pi-subagents is not loaded.
+    const timer = setTimeout(done, 5000);
+    timer.unref?.();
+    pi.events.emit('subagents:rpc:v1:request', { version: 1, requestId, method: 'status' });
+  }
   function setQueued(current: ExtensionContext, next: string[]) {
     if (!queued.length && !next.length) return;
     queued = next;
@@ -322,6 +406,8 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   function hello(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
+    refreshShells();
+    refreshAgents();
     sendHello(current, pending);
     snapshot(current);
   }
@@ -333,10 +419,13 @@ export default function remoteControl(pi: ExtensionAPI) {
     lastTitle = title(current, pending);
     lastBranch = gitBranch(current.cwd);
     const model = current.model;
+    const list = background();
+    sentBackground = JSON.stringify(list);
     send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
       context: contextUsage(current),
       queued: previews(),
+      background: list,
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
   }
@@ -460,4 +549,12 @@ export default function remoteControl(pi: ExtensionAPI) {
     });
   }
   pi.on('session_shutdown', stop);
+  // Optional chaining: hosts without pi.events (older Pi, omp) just never show background work.
+  pi.events?.on('processes:changed', () => {
+    if (!ctx) return;
+    refreshShells();
+    publishBackground();
+  });
+  for (const channel of ['subagents:rpc:v1:ready', 'subagent:async-started', 'subagent:async-complete', 'subagent:child-status', 'subagent:foreground-complete'])
+    pi.events?.on(channel, () => { if (ctx) refreshAgents(); });
 }

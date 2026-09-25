@@ -46,6 +46,7 @@ const MAX_SNAPSHOT_BYTES: usize = 64 << 20;
 const MAX_MODELS: usize = 2000;
 const MAX_SUBSCRIPTIONS: usize = 100;
 const MAX_QUEUED: usize = 20;
+const MAX_BACKGROUND: usize = 20;
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 type Sender = mpsc::UnboundedSender<Message>;
 
@@ -325,9 +326,30 @@ fn queued_list(v: &Value) -> Vec<String> {
     v.as_array().map_or_else(Vec::new, |items| {
         items
             .iter()
-            .filter_map(short_str)
             .take(MAX_QUEUED)
+            .filter_map(short_str)
             .map(String::from)
+            .collect()
+    })
+}
+// Display-only shells and subagents that other Pi extensions report as running.
+fn background_list(v: &Value) -> Vec<Value> {
+    v.as_array().map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .take(MAX_BACKGROUND)
+            .filter_map(|item| {
+                let kind = item["kind"]
+                    .as_str()
+                    .filter(|kind| ["shell", "agent"].contains(kind))?;
+                Some(json!({
+                    "kind": kind,
+                    "id": valid_id(&item["id"])?,
+                    "label": valid_id(&item["label"])?,
+                    "detail": short_str(&item["detail"]).unwrap_or(""),
+                    "startedAt": item["startedAt"].as_u64(),
+                }))
+            })
             .collect()
     })
 }
@@ -428,6 +450,7 @@ struct Session {
     thinking_level: Option<String>,
     context: Option<Value>,
     queued: Vec<String>,
+    background: Vec<Value>,
     models: Vec<Value>,
     owner: Option<Uuid>,
     tx: Option<Sender>,
@@ -435,7 +458,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -703,6 +726,7 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 thinking_level: meta.thinking_level,
                 context: meta.context,
                 queued: Vec::new(),
+                background: Vec::new(),
                 models: Vec::new(),
                 owner: None,
                 tx: None,
@@ -1141,6 +1165,7 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
                     s.tx = None;
                     s.pending = None;
                     s.queued.clear();
+                    s.background.clear();
                     publish(&inner);
                 }
             }
@@ -1260,6 +1285,7 @@ fn agent_message(
             thinking_level: thinking_level(&v["thinkingLevel"]).map(String::from),
             context: context_value(&v["context"]),
             queued: queued_list(&v["queued"]),
+            background: background_list(&v["background"]),
             models: model_list(&v["models"]).unwrap_or_default(),
             owner: Some(id),
             tx: Some(tx.clone()),
@@ -1347,6 +1373,7 @@ fn agent_message(
                     "ui_prompt_start",
                     "ui_prompt_end",
                     "queue_update",
+                    "background_update",
                 ]
                 .contains(&v["event"]["type"].as_str().unwrap_or("")) =>
         {
@@ -1359,6 +1386,10 @@ fn agent_message(
             }
             if kind == "queue_update" {
                 session.queued = queued_list(&v["event"]["queued"]);
+                changed = true;
+            }
+            if kind == "background_update" {
+                session.background = background_list(&v["event"]["background"]);
                 changed = true;
             }
             if kind == "agent_start" || kind == "agent_settled" {
@@ -1398,10 +1429,13 @@ fn agent_message(
             if changed {
                 publish(&inner);
             }
-            broadcast(
-                &inner,
-                json!({"type":"event","processId":p,"sessionId":s,"event":v["event"]}),
-            );
+            // Browsers read these lists from the sanitized sessions frame, never from the agent's raw event.
+            if kind != "queue_update" && kind != "background_update" {
+                broadcast(
+                    &inner,
+                    json!({"type":"event","processId":p,"sessionId":s,"event":v["event"]}),
+                );
+            }
             if kind == "message_end" {
                 send(tx, json!({"type":"history","sessionId":s}));
             }
