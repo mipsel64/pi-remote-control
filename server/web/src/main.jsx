@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
-import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from './parts.js';
+import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import '@fontsource-variable/geist-mono';
 import './style.css';
@@ -78,6 +78,16 @@ function ToolCard({ call, live }) {
 
 function Parts({ parts }) {
   return parts.map((part, index) => part.type === 'image' ? <span key={index} className="chip">[image]</span> : <span key={index}>{part.text}</span>);
+}
+
+// Ticks on its own so only this line re-renders every second, not the conversation.
+function Working({ since, running, offset }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <div className="working"><span className="dot busy" aria-hidden="true" />{workingLabel(running, since, now, offset)}</div>;
 }
 
 function Item({ item, live }) {
@@ -245,6 +255,7 @@ function App() {
   const [status, setStatus] = useState('Connecting…');
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
+  const clockOffset = useRef(0);
   const [signedIn, setSignedIn] = useState(false);
   const [history, setHistory] = useState(initialHistory);
   const [drafts, setDrafts] = useState({});
@@ -447,6 +458,7 @@ function App() {
           if (message.type === 'error') { notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
           const note = sessionNotice(message, { enabled: notifying.current.inPage && !notifying.current.subscribed && Notification.permission === 'granted',
             hidden: document.hidden, selected: data.current.selected, sessions: data.current.sessions });
+          if (message.type === 'sessions' && Number.isFinite(message.now)) clockOffset.current = message.now - Date.now();
           const result = receive(data.current, message);
           publish(result.state);
           if (wanted.current && openSession(wanted.current)) {
@@ -706,6 +718,7 @@ function App() {
       </div>
       <div className="composer-wrap">
         {!atBottom && <button type="button" className="icon-button scroll-bottom" aria-label="Scroll to bottom" onClick={scrollToBottom}><Icon><path d="M12 5v14M19 12l-7 7-7-7" /></Icon></button>}
+        {busy && <Working since={item.busySince} running={toolRunning(items)} offset={clockOffset.current} />}
         {active && item.background?.length > 0 && <details className="background">
           <summary><span className="dot busy" aria-hidden="true" /><span className="background-summary">{backgroundSummary(item.background)}</span><Chevron /></summary>
           <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}>

@@ -436,6 +436,12 @@ fn cookie_valid(h: &HeaderMap, inner: &mut Inner) -> bool {
         }
     }
 }
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
 struct Session {
     id: String,
     connection: String,
@@ -443,6 +449,7 @@ struct Session {
     cwd: String,
     branch: Option<String>,
     busy: bool,
+    busy_since: Option<u64>,
     waiting: bool,
     asking: bool,
     updated_at: u64,
@@ -458,7 +465,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -719,6 +726,7 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 cwd: meta.cwd,
                 branch: meta.branch,
                 busy: false,
+                busy_since: None,
                 waiting: false,
                 asking: false,
                 updated_at: meta.updated_at,
@@ -832,9 +840,13 @@ fn edit_subscriptions(
     inner.subscriptions.drain(..excess);
     let _ = persist.send(Job::Subscriptions(inner.subscriptions.clone()));
 }
-fn publish(inner: &Inner) {
+// `now` lets browsers count from `busySince` even when their clock differs from the server's.
+fn sessions_frame(inner: &Inner) -> Value {
     let list: Vec<_> = inner.sessions.iter().map(|(p, s)| s.info(p)).collect();
-    broadcast(inner, json!({"type":"sessions","sessions":list}));
+    json!({"type":"sessions","sessions":list,"now":now_ms()})
+}
+fn publish(inner: &Inner) {
+    broadcast(inner, sessions_frame(inner));
 }
 fn broadcast(inner: &Inner, msg: Value) {
     for (_, tx) in inner.browsers.values() {
@@ -1098,8 +1110,7 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
         // A logout between the upgrade check and here would otherwise miss this socket.
         if inner.cookies.contains_key(&cookie) {
             inner.browsers.insert(id, (cookie, tx.clone()));
-            let list: Vec<_> = inner.sessions.iter().map(|(p, s)| s.info(p)).collect();
-            send(&tx, json!({"type":"sessions","sessions":list}));
+            send(&tx, sessions_frame(&inner));
         } else {
             let _ = tx.send(Message::Close(Some(axum::extract::ws::CloseFrame {
                 code: 1008,
@@ -1278,6 +1289,12 @@ fn agent_message(
             cwd: cwd.into(),
             branch: valid_id(&v["branch"]).map(String::from),
             busy,
+            // Hellos repeat mid-run (title, model, branch, reconnect), so the same run keeps its start.
+            busy_since: busy.then(|| {
+                old.filter(|previous| previous.id == s)
+                    .and_then(|previous| previous.busy_since)
+                    .unwrap_or_else(now_ms)
+            }),
             waiting: v["waiting"].as_bool().unwrap_or(false),
             asking: v["asking"].as_bool().unwrap_or(false),
             updated_at,
@@ -1394,14 +1411,10 @@ fn agent_message(
             }
             if kind == "agent_start" || kind == "agent_settled" {
                 session.busy = kind == "agent_start";
+                session.busy_since = session.busy.then(now_ms);
                 session.asking = v["event"]["asking"] == true;
                 if kind == "agent_start" {
-                    session.updated_at = session.updated_at.max(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_millis() as u64,
-                    );
+                    session.updated_at = session.updated_at.max(now_ms());
                 }
                 changed = true;
             }

@@ -66,6 +66,16 @@ export function toolSummary(name, args) {
   return value ? firstLine(value) : '';
 }
 
+// A finished assistant turn with a tool call still missing its result means that tool is executing.
+export function toolRunning(items) {
+  const last = items.at(-1);
+  return last?.kind === 'assistant' && !last.streaming && last.parts.some(part => part.type === 'toolCall' && !part.result);
+}
+
+// Matches the Pi terminal status line: one count for the whole run. `since` is server time; `offset` is server minus browser clock.
+export const workingLabel = (running, since, now, offset = 0) =>
+  `${running ? 'Running' : 'Thinking'} (${Math.max(0, Math.floor((now + offset - since) / 1000))}s)`;
+
 export const isBashTool = name => typeof name === 'string' && name.toLowerCase() === 'bash';
 export const toolStatus = (result, live) => result?.isError ? 'error' : result ? 'done' : live ? 'pending' : 'incomplete';
 
