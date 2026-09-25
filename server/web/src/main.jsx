@@ -102,6 +102,17 @@ function Working({ since, running, offset }) {
   return <div className="working"><span className="dot busy" aria-hidden="true" />{workingLabel(running, since, now, offset)}</div>;
 }
 
+// Tapping an item toggles its full name and command.
+function BackgroundJob({ job, now }) {
+  const [open, setOpen] = useState(false);
+  return <button type="button" className="background-job" aria-expanded={open} onClick={() => setOpen(!open)}>
+    <span className="background-kind">{job.kind === 'agent' ? 'agent' : 'shell'}</span>
+    <span className="background-label">{job.label}</span>
+    <span className="background-time">{relativeTime(job.startedAt, now)}</span>
+    {job.detail && <span className="background-detail">{open ? job.full || job.detail : job.detail}</span>}
+  </button>;
+}
+
 function Item({ item, live }) {
   if (item.kind === 'user') return <div className="msg user"><Parts parts={item.parts} /></div>;
   if (item.kind === 'assistant') return <div className="msg assistant">
@@ -735,12 +746,7 @@ function App() {
         {busy && <Working since={item.busySince} running={toolRunning(items)} offset={clockOffset.current} />}
         {active && item.background?.length > 0 && <details className="background">
           <summary><span className="dot busy" aria-hidden="true" /><span className="background-summary">{backgroundSummary(item.background)}</span><Chevron /></summary>
-          <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}>
-            <span className="background-kind">{job.kind === 'agent' ? 'agent' : 'shell'}</span>
-            <span className="background-label" title={job.label}>{job.label}</span>
-            <span className="background-time">{relativeTime(job.startedAt, now)}</span>
-            {job.detail && <span className="background-detail" title={job.detail}>{job.detail}</span>}
-          </li>)}</ul>
+          <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}><BackgroundJob job={job} now={now} /></li>)}</ul>
         </details>}
         {active && item.queued?.length > 0 && <div className="queue">
           <div className="queue-label">{item.queued.length > 1 ? 'queued · sent as one message' : 'queued'}</div>

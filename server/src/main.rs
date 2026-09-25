@@ -47,6 +47,7 @@ const MAX_MODELS: usize = 2000;
 const MAX_SUBSCRIPTIONS: usize = 100;
 const MAX_QUEUED: usize = 20;
 const MAX_BACKGROUND: usize = 20;
+const MAX_BACKGROUND_FULL: usize = 1024;
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 type Sender = mpsc::UnboundedSender<Message>;
 
@@ -342,13 +343,21 @@ fn background_list(v: &Value) -> Vec<Value> {
                 let kind = item["kind"]
                     .as_str()
                     .filter(|kind| ["shell", "agent"].contains(kind))?;
-                Some(json!({
+                let mut job = json!({
                     "kind": kind,
                     "id": valid_id(&item["id"])?,
                     "label": valid_id(&item["label"])?,
                     "detail": short_str(&item["detail"]).unwrap_or(""),
                     "startedAt": item["startedAt"].as_u64(),
-                }))
+                });
+                // The whole command, shown when the item is expanded; only sent when `detail` was shortened.
+                if let Some(full) = item["full"]
+                    .as_str()
+                    .filter(|full| full.encode_utf16().count() <= MAX_BACKGROUND_FULL)
+                {
+                    job["full"] = full.into();
+                }
+                Some(job)
             })
             .collect()
     })

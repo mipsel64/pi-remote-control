@@ -130,7 +130,13 @@ function preview(text: string, max = 200) {
 }
 
 type Fields = Record<string, unknown>;
-type Background = { kind: 'shell' | 'agent'; id: string; label: string; detail: string; startedAt: number | null };
+type Background = { kind: 'shell' | 'agent'; id: string; label: string; detail: string; full?: string; startedAt: number | null };
+// Servers before 0.1.6 drop a `detail` over 256 units, so the longer form travels in its own field, sent only when `detail` was cut.
+function describe(text: string) {
+  const detail = preview(text);
+  const full = preview(text, 1000);
+  return full === detail ? { detail } : { detail, full };
+}
 const MAX_BACKGROUND = 20;
 const LIVE_PROCESS_STATUSES = ['running', 'terminating', 'terminate_timeout'];
 const startTime = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0 ? value as number : null;
@@ -141,7 +147,7 @@ function shellItems(list: unknown): Background[] {
   return list.flatMap((row: Fields) => {
     if (!row || typeof row.id !== 'string' || !row.id || typeof row.command !== 'string' || !LIVE_PROCESS_STATUSES.includes(row.status as string)) return [];
     const name = typeof row.name === 'string' && row.name.trim() ? row.name : row.command;
-    return [{ kind: 'shell' as const, id: row.id, label: preview(name, 80), detail: preview(row.command), startedAt: startTime(row.startTime) }];
+    return [{ kind: 'shell' as const, id: row.id, label: preview(name, 80), ...describe(row.command), startedAt: startTime(row.startTime) }];
   });
 }
 
@@ -153,7 +159,7 @@ function agentItems(reply: unknown): Background[] {
     if (!entry || typeof entry.key !== 'string' || !entry.key || typeof entry.agent !== 'string' || !entry.agent.trim()) return [];
     const label = typeof entry.role === 'string' && entry.role ? `${entry.agent} · ${entry.role}` : entry.agent;
     const detail = [entry.goal, entry.model].filter(part => typeof part === 'string' && part).join(' · ');
-    return [{ kind: 'agent' as const, id: entry.key, label: preview(label, 80), detail: preview(detail), startedAt: startTime(entry.startedAt) }];
+    return [{ kind: 'agent' as const, id: entry.key, label: preview(label, 80), ...describe(detail), startedAt: startTime(entry.startedAt) }];
   });
 }
 

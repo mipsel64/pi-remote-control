@@ -184,7 +184,10 @@ details[open] > summary .chevron { transform: rotate(90deg); }
 .background .chevron { margin-left: auto; }
 .background ul { display: grid; gap: .375rem; max-height: 9rem; margin: 0; padding: .375rem .75rem; overflow-y: auto; list-style: none;
   border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); }
-.background li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: .75ch; min-width: 0; }
+.background-job { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: .75ch; width: 100%; min-width: 0; padding: 0; border: 0;
+  background: transparent; text-align: left; }
+.background-job[aria-expanded="true"] :is(.background-label, .background-detail) { white-space: normal; overflow-wrap: anywhere; }
+.background ul:has([aria-expanded="true"]) { max-height: 18rem; }
 .background-kind { color: var(--ring); }
 .background-label, .background-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .background-label { color: var(--foreground); }
