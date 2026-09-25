@@ -38,7 +38,7 @@ function applySettings({ theme, font, size, icon }) {
   // Percent keeps the browser's own default text size as the baseline.
   root.style.fontSize = `${size}%`;
   for (const meta of document.querySelectorAll('meta[name="theme-color"]'))
-    meta.content = (theme === 'system' ? meta.media.includes('dark') : theme === 'dark') ? '#000000' : '#ffffff';
+    meta.content = (theme === 'system' ? meta.media.includes('dark') : theme === 'dark') ? '#151515' : '#faf9f5';
   // Home-screen installs copy whatever these point at when added; an existing shortcut keeps its old icon.
   const files = iconFiles(icon);
   ['link[rel="manifest"]', 'link[rel="icon"][type="image/svg+xml"]', 'link[rel="icon"][type="image/png"]', 'link[rel="apple-touch-icon"]']
