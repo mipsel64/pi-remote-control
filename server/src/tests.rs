@@ -982,7 +982,7 @@ fn background_items_are_validated_and_bounded() {
     let (id, tx) = attach(&app, "p", "s", 0);
     let background = || app.inner.lock().unwrap().sessions["p"].info("p")["background"].clone();
     assert_eq!(background(), json!([]));
-    let shell = json!({"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","startedAt":1000,"extra":"dropped"});
+    let shell = json!({"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","full":"gh run watch 1 --exit-status","startedAt":1000,"extra":"dropped"});
     let many: Vec<_> = (0..=MAX_BACKGROUND)
         .map(|i| json!({"kind":"agent","id":i.to_string(),"label":"reviewer","detail":"","startedAt":null}))
         .collect();
@@ -993,11 +993,11 @@ fn background_items_are_validated_and_bounded() {
                 {"kind":"daemon","id":"x","label":"x"},
                 {"kind":"shell","id":"","label":"x"},
                 {"kind":"shell","id":"x","label":""},
-                {"kind":"shell","id":"x","label":"x","detail":"y".repeat(257)},
+                {"kind":"shell","id":"x","label":"x","detail":"y".repeat(257),"full":"y".repeat(1025)},
                 "not an item",
             ]),
             json!([
-                {"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","startedAt":1000},
+                {"kind":"shell","id":"ci","label":"watch-ci","detail":"gh run watch 1","full":"gh run watch 1 --exit-status","startedAt":1000},
                 {"kind":"shell","id":"x","label":"x","detail":"","startedAt":null},
             ]),
         ),

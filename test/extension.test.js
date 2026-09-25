@@ -648,8 +648,10 @@ test('background shells and subagents come from other extensions over pi.events'
     wss.close(resolve);
   }));
   // Stand-ins: pi-processes answers inside emit, pi-subagents answers later on a per-request reply channel.
+  // Longer than both the one-line preview (200) and the full form (1000).
+  const long = `gh run watch 1 --exit-status${' --interval 30'.repeat(90)}`;
   let processes = [
-    { id: 'p1', name: 'watch-ci', command: 'gh run watch 1 --exit-status', status: 'running', startTime: 1000 },
+    { id: 'p1', name: 'watch-ci', command: long, status: 'running', startTime: 1000 },
     { id: 'p2', name: 'build', command: 'make', status: 'exited', startTime: 900 },
     { id: 'p3', name: ' ', command: 'npm   run dev', status: 'terminating', startTime: 'soon' },
     { name: 'no id', command: 'x', status: 'running' },
@@ -679,7 +681,7 @@ test('background shells and subagents come from other extensions over pi.events'
     throw new Error('Timed out waiting for WS message');
   }
   const updates = () => messages.filter(msg => msg.type === 'event' && msg.event.type === 'background_update').map(msg => msg.event.background);
-  const watch = { kind: 'shell', id: 'p1', label: 'watch-ci', detail: 'gh run watch 1 --exit-status', startedAt: 1000 };
+  const watch = { kind: 'shell', id: 'p1', label: 'watch-ci', detail: `${long.slice(0, 199)}…`, full: `${long.slice(0, 999)}…`, startedAt: 1000 };
   const dev = { kind: 'shell', id: 'p3', label: 'npm run dev', detail: 'npm run dev', startedAt: null };
   const reviewer = { kind: 'agent', id: 'fleet-1', label: 'reviewer · security', detail: 'gpt-6-sol', startedAt: 2000 };
 
