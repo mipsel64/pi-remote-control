@@ -77,7 +77,13 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   padding: env(safe-area-inset-top) max(1rem, env(safe-area-inset-right)) 0 1rem; }
 .thread-heading { display: grid; flex: 1; min-width: 0; line-height: 1.4; }
 .thread-title { display: flex; align-items: center; gap: .25rem; min-width: 0; }
-.title-input { flex: 1; min-width: 0; padding: 0 .375rem; border: 1px solid var(--border); border-radius: 2px; background: transparent; color: var(--foreground); }
+/* The title button and its rename input share box metrics, so the text stays put when editing starts. */
+.title-input, .title-button { margin-left: -.375rem; padding: 0 .375rem; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--foreground); font-weight: 600; }
+.title-input { flex: 1; min-width: 0; border-color: var(--ring); outline: none; }
+.title-button { display: block; max-width: calc(100% + .375rem); overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: text; }
+/* #session-title clips overflow, so focus is drawn as the border instead of the outset outline. */
+.title-button:hover { border-color: var(--border); }
+.title-button:focus-visible { border-color: var(--ring); outline: none; }
 #session-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); font-size: inherit; font-weight: 600; }
 .badge { display: inline-flex; flex: none; align-items: center; gap: .5rem; font-size: .8125rem; text-transform: lowercase; white-space: nowrap; }
 .badge.waiting { color: var(--waiting); }
@@ -252,7 +258,7 @@ button.model-trigger:enabled:hover, .model-trigger[aria-expanded="true"] { backg
 .settings-button { height: 2.25rem; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); }
 .settings-button:hover { background: var(--muted); }
 /* iOS zooms into focused controls under 16px. */
-@media (pointer: coarse) { #prompt, #password, .model-filter, .title-input { font-size: max(16px, 1rem); } .menu-row { min-height: 2.75rem; } }
+@media (pointer: coarse) { #prompt, #password, .model-filter, .title-input, #session-title { font-size: max(16px, 1rem); } .menu-row { min-height: 2.75rem; } }
 
 @keyframes pulse { 50% { opacity: .35; } }
 @keyframes blink { 50% { opacity: 0; } }

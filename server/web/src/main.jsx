@@ -319,6 +319,9 @@ function App() {
   const menu = useRef(null);
   const sidebar = useRef(null);
   const actionsButton = useRef(null);
+  const titleButton = useRef(null);
+  // Escape returns focus to whichever control started the rename.
+  const renameFrom = useRef(actionsButton);
   const renameDone = useRef(false);
   const settingsDialog = useRef(null);
   const [settings, setSettings] = useState(loadSettings);
@@ -571,7 +574,8 @@ function App() {
     const pick = data.current.optimistic[current.processId];
     setTimeout(() => publish(unchoose(data.current, current.processId, pick)), 5000);
   }
-  function startRename(session) {
+  function startRename(session, from = actionsButton) {
+    renameFrom.current = from;
     if (session.processId !== data.current.selected) openSession(session.processId);
     renameDone.current = false;
     setEditing(`${session.processId}\u0000${session.sessionId}`);
@@ -609,7 +613,7 @@ function App() {
     else if (event.key === 'Escape') {
       renameDone.current = true;
       setEditing(null);
-      requestAnimationFrame(() => actionsButton.current?.focus());
+      requestAnimationFrame(() => renameFrom.current.current?.focus());
     }
   }
   const changeModel = value => sendChoice({ type: 'set_model', ...splitModelKey(value) }, { model: value });
@@ -695,6 +699,8 @@ function App() {
     history.awaiting ? <div className="skeleton" aria-busy="true"><span className="sr-only">Loading conversation…</span><i /><i /><i /></div> :
     <div className="empty"><h2>How can I help you today?</h2><p>Send a message to Pi to begin.</p></div>;
 
+  const heading = item ? displayName(item) : 'Your chats';
+  const canRename = Boolean(item && socketOpen && item.online);
   return <div id="control">
     <aside id="sidebar" ref={sidebar} className={drawer ? 'open' : undefined} aria-label="Sessions">
       <div className="sidebar-header">{brand}</div>
@@ -729,7 +735,9 @@ function App() {
         <div className="thread-heading"><div className="thread-title">{renaming
           ? <input className="title-input" aria-label="Session name" defaultValue={title} maxLength={1024} autoFocus
             onFocus={event => event.currentTarget.select()} onBlur={event => finishRename(event.currentTarget.value)} onKeyDown={onRenameKey} />
-          : <><h2 id="session-title">{item ? displayName(item) : 'Your chats'}</h2>
+          : <><h2 id="session-title">{canRename
+            ? <button ref={titleButton} type="button" className="title-button" title="Rename" aria-label={`Rename ${heading}`} onClick={() => startRename(item, titleButton)}>{heading}</button>
+            : heading}</h2>
             {item && <SessionMenu actions={sessionActions(item)} label={`Actions for ${displayName(item)}`} buttonRef={actionsButton} align="start" />}</>}</div>
           {item && <Location session={item} />}</div>
         {badge && <span className={`badge ${badge}`}><span className={`dot ${badge}`} aria-hidden="true" />{statusLabel[badge]}</span>}
