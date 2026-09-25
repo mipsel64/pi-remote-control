@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { backgroundSummary, buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolStatus, toolSummary, usageSummary } from '../src/parts.js';
+import { backgroundSummary, buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from '../src/parts.js';
 import { Markdown } from '../src/markdown.js';
 
 const message = message => ({ type: 'message', message });
@@ -204,4 +204,21 @@ test('backgroundSummary counts shells and subagents', () => {
   assert.equal(backgroundSummary([shell]), '1 shell running');
   assert.equal(backgroundSummary([agent, agent]), '2 subagents running');
   assert.equal(backgroundSummary([shell, agent, shell]), '2 shells \u00b7 1 subagent running');
+});
+
+test('the working line shows Running while a tool executes and Thinking otherwise', () => {
+  const call = { type: 'toolCall', id: 'c1', name: 'bash', arguments: { command: 'sleep 3' } };
+  const user = { type: 'message', message: { role: 'user', content: 'go' } };
+  const assistant = { type: 'message', message: { role: 'assistant', content: [call] } };
+  const result = { type: 'message', message: { role: 'toolResult', toolCallId: 'c1', toolName: 'bash', content: [] } };
+  assert.equal(toolRunning(buildThread([user])), false);
+  assert.equal(toolRunning(buildThread([user], { message: assistant.message, ended: false })), false);
+  assert.equal(toolRunning(buildThread([user, assistant])), true);
+  assert.equal(toolRunning(buildThread([user, assistant, result])), false);
+  assert.equal(workingLabel(false, 10_000, 12_999), 'Thinking (2s)');
+  assert.equal(workingLabel(true, 10_000, 10_000), 'Running (0s)');
+  assert.equal(workingLabel(false, 10_000, 9_000), 'Thinking (0s)');
+  // Browser clock 60 s behind the server (offset +60 s) and 60 s ahead (offset -60 s).
+  assert.equal(workingLabel(false, 100_000, 43_000, 60_000), 'Thinking (3s)');
+  assert.equal(workingLabel(true, 100_000, 163_000, -60_000), 'Running (3s)');
 });

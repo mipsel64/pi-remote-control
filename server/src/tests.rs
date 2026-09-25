@@ -120,7 +120,9 @@ async fn auth_relay_reconnect_and_embedded_assets() {
         .insert("Origin", "http://127.0.0.1:8787".parse().unwrap());
     req.headers_mut().insert("Cookie", cookie.parse().unwrap());
     let (mut browser, _) = connect_async(req.clone()).await.unwrap();
-    assert_eq!(next(&mut browser).await["type"], "sessions");
+    let first_frame = next(&mut browser).await;
+    assert_eq!(first_frame["type"], "sessions");
+    assert!(first_frame["now"].as_u64().unwrap() > 0);
     agent.send(WsMessage::Text(json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false,"updatedAt":1234}).to_string().into())).await.unwrap();
     assert_eq!(next(&mut agent).await["type"], "history");
     let initial = next(&mut browser).await;
@@ -890,6 +892,51 @@ fn ui_prompt_events_mark_session_waiting() {
     assert_eq!(event(json!({"type":"agent_settled","asking":true})), true);
     go_offline(&app, "p");
     assert_eq!(waiting(), false);
+}
+
+#[test]
+fn busy_since_marks_the_start_of_the_current_run() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let since = || app.inner.lock().unwrap().sessions["p"].info("p")["busySince"].clone();
+    let send = |frame: Value| assert!(agent_message(&app, id, &tx, &mut Some("p".into()), &frame));
+    let event = |kind: &str| {
+        send(json!({"type":"event","processId":"p","sessionId":"s","event":{"type":kind}}))
+    };
+    let hello = |session: &str, busy: bool| {
+        send(
+            json!({"type":"hello","processId":"p","sessionId":session,"name":"Pi","cwd":"/tmp","busy":busy}),
+        )
+    };
+    let set = |value: u64| {
+        app.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut("p")
+            .unwrap()
+            .busy_since = Some(value)
+    };
+    assert_eq!(since(), Value::Null);
+    let before = now_ms();
+    event("agent_start");
+    assert!(since().as_u64().unwrap() >= before);
+    set(1000);
+    hello("s", true);
+    assert_eq!(since(), 1000);
+    go_offline(&app, "p");
+    hello("s", true);
+    assert_eq!(since(), 1000);
+    event("agent_settled");
+    assert_eq!(since(), Value::Null);
+    hello("s", true);
+    assert!(since().as_u64().unwrap() >= before);
+    set(1000);
+    hello("other", true);
+    assert!(since().as_u64().unwrap() >= before);
+    hello("other", false);
+    assert_eq!(since(), Value::Null);
 }
 
 #[test]
