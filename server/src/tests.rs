@@ -822,7 +822,7 @@ fn attach(app: &App, process: &str, session: &str, updated_at: u64) -> (Uuid, Se
         id,
         &tx,
         &mut None,
-        &json!({"type":"hello","processId":process,"sessionId":session,"name":"Pi","cwd":"/tmp","branch":"main","busy":false,"updatedAt":updated_at})
+        &json!({"type":"hello","processId":process,"sessionId":session,"name":"Pi","cwd":"/tmp","host":"mac","branch":"main","busy":false,"updatedAt":updated_at})
     ));
     (id, tx)
 }
@@ -1053,6 +1053,7 @@ fn offline_snapshot_survives_restart_and_replays_on_select() {
     assert_eq!(listed["busy"], false);
     assert_eq!(listed["name"], "Pi");
     assert_eq!(listed["branch"], "main");
+    assert_eq!(listed["host"], "mac");
     assert_eq!(listed["updatedAt"], 1234);
     assert_eq!(parse(select(&app, "p")), vec![expected]);
     let (btx, mut brx) = mpsc::unbounded_channel();
@@ -1301,6 +1302,7 @@ fn retention_keeps_fifty_sessions_and_never_prunes_online() {
         session_id: "x".into(),
         name: String::new(),
         cwd: String::new(),
+        host: None,
         branch: None,
         updated_at: 0,
         model: None,

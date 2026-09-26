@@ -427,7 +427,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     const model = current.model;
     const list = background();
     sentBackground = JSON.stringify(list);
-    send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
+    send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, host: os.hostname().split('.')[0], branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
       context: contextUsage(current),
       queued: previews(),

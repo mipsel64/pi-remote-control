@@ -319,6 +319,7 @@ test('authenticated snapshots, events, session ownership, follow-up and shutdown
   assert.equal(hello.busy, false);
   assert.equal(hello.name, 'earlier');
   assert.equal(hello.branch, null);
+  assert.equal(hello.host, os.hostname().split('.')[0]);
   assert.equal(hello.waiting, false);
   assert.equal(hello.updatedAt, Date.parse(ctx.state.entries[0].timestamp));
   assert.deepEqual((await first.next(msg => msg.type === 'snapshot')).entries, ctx.state.entries);
