@@ -12,6 +12,7 @@ const pushCapable = location.protocol === 'https:' && 'serviceWorker' in navigat
 const homeScreenHint = needsHomeScreen({ userAgent: navigator.userAgent, platform: navigator.platform, maxTouchPoints: navigator.maxTouchPoints, standalone: navigator.standalone, canNotify, secure: window.isSecureContext });
 const IN_PAGE_KEY = 'prc-notifications';
 const PIN_KEY = 'prc-pinned';
+const SIDEBAR_KEY = 'prc-sidebar-hidden';
 const SETTINGS_KEY = 'prc-settings';
 // Manifest, SVG favicon, PNG favicon, and Apple touch icon; scripts/icons.mjs builds the coloured ones.
 const iconFiles = color => color === 'default' ? ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/apple-touch-icon.png']
@@ -330,6 +331,7 @@ function App() {
   const [drawer, setDrawer] = useState(false);
   const drawerOpen = useRef(false);
   drawerOpen.current = drawer;
+  const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem(SIDEBAR_KEY) === '1');
   const [atBottom, setAtBottom] = useState(true);
   const [editing, setEditing] = useState(null);
   const [pinned, setPinned] = useState(() => {
@@ -387,6 +389,12 @@ function App() {
   }
   function openDrawer() { setDrawer(true); requestAnimationFrame(() => sidebar.current?.querySelector('button')?.focus()); }
   function closeDrawer() { setDrawer(false); menu.current?.focus(); }
+  const isPhone = () => matchMedia('(max-width: 759px)').matches;
+  function toggleSidebar() {
+    if (isPhone()) return drawer ? closeDrawer() : openDrawer();
+    localStorage.setItem(SIDEBAR_KEY, sidebarHidden ? '0' : '1');
+    setSidebarHidden(!sidebarHidden);
+  }
   function scrollToBottom() {
     const node = log.current;
     node?.scrollTo({ top: node.scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
@@ -725,7 +733,8 @@ function App() {
 
   const heading = item ? displayName(item) : 'Your chats';
   const canRename = Boolean(item && socketOpen && item.online);
-  return <div id="control">
+  const sidebarShown = isPhone() ? drawer : !sidebarHidden;
+  return <div id="control" className={sidebarHidden ? 'sidebar-hidden' : undefined}>
     <aside id="sidebar" ref={sidebar} className={drawer ? 'open' : undefined} aria-label="Sessions">
       <div className="sidebar-header">{brand}</div>
       <nav id="sessions">
@@ -755,8 +764,9 @@ function App() {
     {drawer && <div className="backdrop" onClick={closeDrawer} />}
     <main className="conversation" aria-label="Conversation">
       <header className="thread-header">
-        <button ref={menu} type="button" className="icon-button menu-button" aria-label="Sessions" aria-controls="sidebar" aria-expanded={drawer} onClick={() => drawer ? closeDrawer() : openDrawer()}>
-          <Icon><path d="M4 6h16M4 12h16M4 18h16" /></Icon></button>
+        <button ref={menu} type="button" className="icon-button menu-button" aria-label="Sessions" aria-controls="sidebar" aria-expanded={sidebarShown}
+          title={sidebarShown ? 'Hide sessions' : 'Show sessions'} onClick={toggleSidebar}>
+          <Icon><rect width="18" height="18" x="3" y="3" rx="2" /><path d="M9 3v18" /></Icon></button>
         <div className="thread-heading"><div className="thread-title">{renaming
           ? <input className="title-input" aria-label="Session name" defaultValue={title} maxLength={1024} autoFocus
             onFocus={event => event.currentTarget.select()} onBlur={event => finishRename(event.currentTarget.value)} onKeyDown={onRenameKey} />
