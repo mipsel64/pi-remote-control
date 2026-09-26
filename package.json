@@ -1,6 +1,6 @@
 {
   "name": "@mipsel64/pi-remote-control",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Pi extension that attaches running Pi sessions to Pi Remote Control (prc).",
   "license": "MIT",
   "repository": {
