@@ -282,7 +282,7 @@ function InfoDialog({ dialog, session }) {
         <button type="button" className="icon-button" aria-label="Close session info" onClick={() => dialog.current.close()}><Close /></button></div>
       <dl className="info-list">{rows.map(([label, value]) => <div key={label} className="info-row">
         <dt className="settings-label">{label}</dt>
-        <dd><span className="info-value">{value}</span>
+        <dd><code className="info-value">{value}</code>
           <button type="button" className="icon-button" aria-label={`Copy ${label.toLowerCase()}`} title="Copy" onClick={() => copy(label, value)}><Copy /></button></dd>
       </div>)}</dl>
       <p className="settings-hint info-status" role="status">{status}</p>

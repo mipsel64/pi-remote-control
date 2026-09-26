@@ -258,8 +258,11 @@ button.model-trigger:enabled:hover, .model-trigger[aria-expanded="true"] { backg
 .settings-button { height: 2.25rem; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); }
 .settings-button:hover { background: var(--muted); }
 .info-list { display: grid; gap: .75rem; margin: 0; }
+.info-row { display: grid; gap: .25rem; }
+.info-row dt { font-weight: 600; }
 .info-row dd { display: flex; align-items: center; gap: .5rem; margin: 0; }
-.info-value { flex: 1; min-width: 0; color: var(--foreground); overflow-wrap: anywhere; }
+.info-value { flex: 1; min-width: 0; padding: .375rem .625rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--muted);
+  color: var(--foreground); font: .8125rem/1.6 var(--mono); overflow-wrap: anywhere; }
 .info-status { min-height: 1lh; }
 /* iOS zooms into focused controls under 16px. */
 @media (pointer: coarse) { #prompt, #password, .model-filter, .title-input, #session-title { font-size: max(16px, 1rem); } .menu-row { min-height: 2.75rem; } }
