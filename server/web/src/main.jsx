@@ -58,8 +58,8 @@ const More = () => <Icon><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" 
 const Pin = () => <Icon><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></Icon>;
 const PinOff = () => <Icon><path d="M12 17v5" /><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89" /><path d="m2 2 20 20" /><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11" /></Icon>;
 const Pencil = () => <Icon><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" /><path d="m15 5 4 4" /></Icon>;
-const Folder = () => <Icon><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></Icon>;
-const Branch = () => <Icon><path d="M15 6a9 9 0 0 0-9 9V3" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" /></Icon>;
+const Info = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></Icon>;
+const Copy = () => <Icon><rect width="14" height="14" x="8" y="8" rx="2" /><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></Icon>;
 const Trash = () => <Icon><path d="M10 11v6" /><path d="M14 11v6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /><path d="M3 6h18" /><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></Icon>;
 const Alert = () => <Icon><circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" /></Icon>;
 const Close = () => <Icon><path d="M18 6 6 18M6 6l12 12" /></Icon>;
@@ -238,6 +238,8 @@ function Location({ session }) {
 function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' }) {
   const id = useId();
   const panel = useRef(null);
+  const own = useRef(null);
+  const trigger = buttonRef ?? own;
   // Top-layer popover escapes the scrolling sidebar; align it to the trigger, kept on screen and flipped up near the bottom.
   function place(event) {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -248,10 +250,10 @@ function SessionMenu({ actions, label, className = '', buttonRef, align = 'end' 
       top: up ? 'auto' : `${rect.bottom + 4}px`, bottom: up ? `${clientHeight - rect.top + 4}px` : 'auto' });
   }
   return <>
-    <button ref={buttonRef} type="button" className={`icon-button actions-trigger ${className}`} popoverTarget={id} aria-label={label} title="Session actions" onClick={place}><More /></button>
+    <button ref={trigger} type="button" className={`icon-button actions-trigger ${className}`} popoverTarget={id} aria-label={label} title="Session actions" onClick={place}><More /></button>
     <div ref={panel} id={id} popover="auto" className="session-menu">
       {actions.map(action => <button key={action.label} type="button" className={`menu-row${action.danger ? ' danger' : ''}`}
-        onClick={() => { panel.current.hidePopover(); action.run(); }}>{action.icon}<span className="menu-label">{action.label}</span></button>)}
+        onClick={() => { panel.current.hidePopover(); trigger.current.focus(); action.run(); }}>{action.icon}<span className="menu-label">{action.label}</span></button>)}
     </div>
   </>;
 }
@@ -261,6 +263,31 @@ function Choice({ legend, name, value, onChange }) {
     {SETTING_OPTIONS[name].map(([key, label]) => <label key={key}>
       <input type="radio" name={name} value={key} checked={value === key} onChange={() => onChange(name, key)} /><span>{label}</span></label>)}
   </div></fieldset>;
+}
+
+function InfoDialog({ dialog, session }) {
+  const [status, setStatus] = useState('');
+  const timer = useRef(null);
+  const rows = [['Machine', session?.host], ['Path', session?.cwd], ['Branch', session?.branch], ['Session ID', session?.sessionId]].filter(([, value]) => value);
+  async function copy(label, value) {
+    try { await navigator.clipboard.writeText(value); setStatus(`${label} copied`); }
+    catch { setStatus(`Could not copy ${label.toLowerCase()}`); }
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setStatus(''), 2000);
+  }
+  return <dialog ref={dialog} className="settings" aria-labelledby="info-title"
+    onClick={event => { if (event.target === event.currentTarget) event.currentTarget.close(); }}>
+    <div className="settings-body">
+      <div className="settings-header"><h2 id="info-title">Session info</h2>
+        <button type="button" className="icon-button" aria-label="Close session info" onClick={() => dialog.current.close()}><Close /></button></div>
+      <dl className="info-list">{rows.map(([label, value]) => <div key={label} className="info-row">
+        <dt className="settings-label">{label}</dt>
+        <dd><span className="info-value">{value}</span>
+          <button type="button" className="icon-button" aria-label={`Copy ${label.toLowerCase()}`} title="Copy" onClick={() => copy(label, value)}><Copy /></button></dd>
+      </div>)}</dl>
+      <p className="settings-hint info-status" role="status">{status}</p>
+    </div>
+  </dialog>;
 }
 
 function SettingsDialog({ dialog, settings, onChange, onSignOut }) {
@@ -324,6 +351,8 @@ function App() {
   const renameFrom = useRef(actionsButton);
   const renameDone = useRef(false);
   const settingsDialog = useRef(null);
+  const infoDialog = useRef(null);
+  const [infoFor, setInfoFor] = useState(null);
   const [settings, setSettings] = useState(loadSettings);
 
   function publish(next) { data.current = next; setHistory(next); }
@@ -580,10 +609,6 @@ function App() {
     renameDone.current = false;
     setEditing(`${session.processId}\u0000${session.sessionId}`);
   }
-  async function copy(text, what) {
-    try { await navigator.clipboard.writeText(text); notify(`${what} copied`); }
-    catch { notify(`Could not copy ${what.toLowerCase()}`, 'error'); }
-  }
   function togglePin(sessionId) {
     const next = pinned.includes(sessionId) ? pinned.filter(id => id !== sessionId) : [...pinned, sessionId];
     localStorage.setItem(PIN_KEY, JSON.stringify(next));
@@ -592,8 +617,7 @@ function App() {
   const displayName = session => (history.optimistic[session.processId]?.name ?? session.name) || DEFAULT_NAME;
   const sessionActions = session => [
     socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
-    session.cwd && { label: 'Copy full path', icon: <Folder />, run: () => copy(session.cwd, 'Path') },
-    session.branch && { label: 'Copy current branch', icon: <Branch />, run: () => copy(session.branch, 'Branch') },
+    { label: 'Info', icon: <Info />, run: () => { setInfoFor(session.processId); infoDialog.current.showModal(); } },
     pinned.includes(session.sessionId) ? { label: 'Unpin', icon: <PinOff />, run: () => togglePin(session.sessionId) }
       : { label: 'Pin', icon: <Pin />, run: () => togglePin(session.sessionId) },
     socketOpen && !session.online && { label: 'Remove', icon: <Trash />, danger: true, run: () => removeSession(session) },
@@ -727,6 +751,7 @@ function App() {
       </div>
     </aside>
     <SettingsDialog dialog={settingsDialog} settings={settings} onChange={changeSetting} onSignOut={signOut} />
+    <InfoDialog dialog={infoDialog} session={history.sessions.find(session => session.processId === infoFor)} />
     {drawer && <div className="backdrop" onClick={closeDrawer} />}
     <main className="conversation" aria-label="Conversation">
       <header className="thread-header">

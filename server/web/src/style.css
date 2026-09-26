@@ -110,7 +110,7 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .skeleton i:nth-child(3) { width: 85%; height: 4rem; }
 
 .msg { overflow-wrap: anywhere; }
-.msg.user { padding-left: .75rem; border-left: 2px solid var(--foreground); color: var(--foreground); white-space: pre-wrap; }
+.msg.user { align-self: flex-end; max-width: 85%; padding: .625rem 1rem; border-radius: 1rem; background: var(--muted); color: var(--foreground); white-space: pre-wrap; }
 .msg.assistant { display: flex; flex-direction: column; gap: .75rem; }
 .msg.assistant > .md { color: var(--foreground); }
 .md { overflow-wrap: anywhere; }
@@ -257,6 +257,10 @@ button.model-trigger:enabled:hover, .model-trigger[aria-expanded="true"] { backg
 .settings-actions { display: grid; gap: .375rem; }
 .settings-button { height: 2.25rem; border: 1px solid var(--border); border-radius: var(--radius); background: transparent; color: var(--foreground); }
 .settings-button:hover { background: var(--muted); }
+.info-list { display: grid; gap: .75rem; margin: 0; }
+.info-row dd { display: flex; align-items: center; gap: .5rem; margin: 0; }
+.info-value { flex: 1; min-width: 0; color: var(--foreground); overflow-wrap: anywhere; }
+.info-status { min-height: 1lh; }
 /* iOS zooms into focused controls under 16px. */
 @media (pointer: coarse) { #prompt, #password, .model-filter, .title-input, #session-title { font-size: max(16px, 1rem); } .menu-row { min-height: 2.75rem; } }
 

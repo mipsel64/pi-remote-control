@@ -456,6 +456,7 @@ struct Session {
     connection: String,
     name: String,
     cwd: String,
+    host: Option<String>,
     branch: Option<String>,
     busy: bool,
     busy_since: Option<u64>,
@@ -474,7 +475,7 @@ struct Session {
 }
 impl Session {
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"host":self.host,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -482,6 +483,7 @@ impl Session {
             session_id: self.id.clone(),
             name: self.name.clone(),
             cwd: self.cwd.clone(),
+            host: self.host.clone(),
             branch: self.branch.clone(),
             updated_at: self.updated_at,
             model: self.model.clone(),
@@ -503,6 +505,8 @@ struct StoredMeta {
     session_id: String,
     name: String,
     cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branch: Option<String>,
     updated_at: u64,
@@ -733,6 +737,7 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 connection: Uuid::new_v4().to_string(),
                 name: meta.name,
                 cwd: meta.cwd,
+                host: meta.host,
                 branch: meta.branch,
                 busy: false,
                 busy_since: None,
@@ -1296,6 +1301,7 @@ fn agent_message(
             connection,
             name: name.into(),
             cwd: cwd.into(),
+            host: valid_id(&v["host"]).map(String::from),
             branch: valid_id(&v["branch"]).map(String::from),
             busy,
             // Hellos repeat mid-run (title, model, branch, reconnect), so the same run keeps its start.
