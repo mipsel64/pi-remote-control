@@ -616,8 +616,8 @@ function App() {
   }
   const displayName = session => (history.optimistic[session.processId]?.name ?? session.name) || DEFAULT_NAME;
   const sessionActions = session => [
-    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
     { label: 'Info', icon: <Info />, run: () => { setInfoFor(session.processId); infoDialog.current.showModal(); } },
+    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
     pinned.includes(session.sessionId) ? { label: 'Unpin', icon: <PinOff />, run: () => togglePin(session.sessionId) }
       : { label: 'Pin', icon: <Pin />, run: () => togglePin(session.sessionId) },
     socketOpen && !session.online && { label: 'Remove', icon: <Trash />, danger: true, run: () => removeSession(session) },
