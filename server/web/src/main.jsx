@@ -282,7 +282,7 @@ function InfoDialog({ dialog, session }) {
         <button type="button" className="icon-button" aria-label="Close session info" onClick={() => dialog.current.close()}><Close /></button></div>
       <dl className="info-list">{rows.map(([label, value]) => <div key={label} className="info-row">
         <dt className="settings-label">{label}</dt>
-        <dd><span className="info-value">{value}</span>
+        <dd><code className="info-value">{value}</code>
           <button type="button" className="icon-button" aria-label={`Copy ${label.toLowerCase()}`} title="Copy" onClick={() => copy(label, value)}><Copy /></button></dd>
       </div>)}</dl>
       <p className="settings-hint info-status" role="status">{status}</p>
@@ -616,8 +616,8 @@ function App() {
   }
   const displayName = session => (history.optimistic[session.processId]?.name ?? session.name) || DEFAULT_NAME;
   const sessionActions = session => [
-    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
     { label: 'Info', icon: <Info />, run: () => { setInfoFor(session.processId); infoDialog.current.showModal(); } },
+    socketOpen && session.online && { label: 'Rename', icon: <Pencil />, run: () => startRename(session) },
     pinned.includes(session.sessionId) ? { label: 'Unpin', icon: <PinOff />, run: () => togglePin(session.sessionId) }
       : { label: 'Pin', icon: <Pin />, run: () => togglePin(session.sessionId) },
     socketOpen && !session.online && { label: 'Remove', icon: <Trash />, danger: true, run: () => removeSession(session) },
