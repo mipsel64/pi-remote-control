@@ -1,6 +1,6 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
+import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, matchSession, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
 import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import ICON_COLORS from './icon-colors.json';
@@ -334,6 +334,7 @@ function App() {
   const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem(SIDEBAR_KEY) === '1');
   const [atBottom, setAtBottom] = useState(true);
   const [editing, setEditing] = useState(null);
+  const [query, setQuery] = useState('');
   const [pinned, setPinned] = useState(() => {
     try { const saved = JSON.parse(localStorage.getItem(PIN_KEY)); return Array.isArray(saved) ? saved : []; } catch { return []; }
   });
@@ -734,11 +735,15 @@ function App() {
   const heading = item ? displayName(item) : 'Your chats';
   const canRename = Boolean(item && socketOpen && item.online);
   const sidebarShown = isPhone() ? drawer : !sidebarHidden;
+  const shownSessions = pinFirst(history.sessions, pinned).filter(session => matchSession(session, displayName(session), query));
   return <div id="control" className={sidebarHidden ? 'sidebar-hidden' : undefined}>
     <aside id="sidebar" ref={sidebar} className={drawer ? 'open' : undefined} aria-label="Sessions">
       <div className="sidebar-header">{brand}</div>
+      {history.sessions.length > 0 && <input className="session-filter" type="search" aria-label="Search sessions" placeholder="Search sessions"
+        value={query} onChange={event => setQuery(event.target.value)}
+        onKeyDown={event => { if (event.key === 'Escape' && query) { event.stopPropagation(); setQuery(''); } }} />}
       <nav id="sessions">
-        {pinFirst(history.sessions, pinned).map(session => {
+        {shownSessions.map(session => {
           const state = sessionStatus(session);
           const name = displayName(session);
           const isPinned = pinned.includes(session.sessionId);
@@ -752,7 +757,8 @@ function App() {
             <SessionMenu actions={sessionActions(session)} label={`Actions for ${name}`} className="thread-actions" />
           </div>;
         })}
-        {!history.sessions.length && <p className="sidebar-empty">Connected Pi sessions appear here.</p>}
+        {!history.sessions.length ? <p className="sidebar-empty">Connected Pi sessions appear here.</p>
+          : !shownSessions.length && <p className="sidebar-empty">No sessions match</p>}
       </nav>
       <div className="sidebar-footer">
         {homeScreenHint && <p className="sidebar-hint">For notifications on iPhone or iPad: tap Share, then Add to Home Screen, and open Pi Remote Control from the Home Screen.</p>}

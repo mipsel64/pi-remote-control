@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { buildAsset, choose, contentText, folderName, initialHistory, pinFirst, needsHomeScreen, receive, sessionStatus, sessionNotice, swipeAction, unchoose, appHeight } from '../src/history.js';
+import { buildAsset, choose, contentText, folderName, initialHistory, matchSession, pinFirst, needsHomeScreen, receive, sessionStatus, sessionNotice, swipeAction, unchoose, appHeight } from '../src/history.js';
 
 const session = (sessionId = 's1', connectionId = 'c1', online = true) =>
   ({ processId: 'p1', sessionId, connectionId, name: 'Pi', cwd: '/tmp', online, busy: false });
@@ -368,4 +368,13 @@ test('appHeight follows the area above the keyboard and ignores pinch-zoom', () 
   assert.equal(appHeight({ height: 844, scale: 1 }), '844px');
   assert.equal(appHeight({ height: 503.6, scale: 1 }), '504px');
   assert.equal(appHeight({ height: 400, scale: 2 }), null);
+});
+
+test('session search matches name, folder path, and branch case-insensitively', () => {
+  const item = { cwd: '/Users/me/projects/app', branch: 'feat/Login' };
+  assert.equal(matchSession(item, 'Fix bug', '  '), true);
+  assert.equal(matchSession(item, 'Fix bug', 'BUG'), true);
+  assert.equal(matchSession(item, 'Fix bug', 'projects/app'), true);
+  assert.equal(matchSession(item, 'Fix bug', 'login'), true);
+  assert.equal(matchSession({ cwd: '/tmp' }, 'Pi', 'main'), false);
 });

@@ -13,6 +13,10 @@ export const initialHistory = { sessions: [], selected: null, entries: [], strea
 export const DEFAULT_NAME = 'New Session';
 export const folderName = cwd => String(cwd ?? '').split(/[\\/]/).filter(Boolean).pop() || cwd || '';
 export const pinFirst = (sessions, pinned) => [...sessions.filter(item => pinned.includes(item.sessionId)), ...sessions.filter(item => !pinned.includes(item.sessionId))];
+export function matchSession(session, name, query) {
+  const needle = query.trim().toLowerCase();
+  return !needle || [name, session.cwd, session.branch].some(value => String(value ?? '').toLowerCase().includes(needle));
+}
 export const currentSession = state => state.sessions.find(item => item.processId === state.selected);
 export const sessionStatus = session => !session.online ? 'offline' : session.waiting ? 'waiting' : session.busy ? 'busy' : 'idle';
 export const statusLabel = { idle: 'Idle', busy: 'Busy', offline: 'Offline', waiting: 'Needs input', connecting: 'Connecting…' };
