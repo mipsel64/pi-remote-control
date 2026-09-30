@@ -217,9 +217,12 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Pi rejects prompts during manual compaction; only hold them between active runs.
   // Kept across /rc close: the run still settles and delivers it.
   let queued: string[] = [];
+  // Display only: Pi owns delivery. Each record is one native message, including joined held prompts.
+  let pending: { text: string; observedPending: boolean }[] = [];
+  let pendingTimer: ReturnType<typeof setInterval> | undefined;
   let stopped = false;
   let runSignal: AbortSignal | undefined;
-  const previews = () => queued.map(text => preview(text));
+  const previews = () => [...pending.map(item => item.text), ...queued].map(text => preview(text));
   // Filled from other extensions' pi.events protocols; a list stays empty when its extension is not loaded.
   let shells: Background[] = [];
   let agents: Background[] = [];
@@ -274,14 +277,61 @@ export default function remoteControl(pi: ExtensionAPI) {
     timer.unref?.();
     pi.events.emit('subagents:rpc:v1:request', { version: 1, requestId, method: 'status' });
   }
+  function publishQueue(current: ExtensionContext) {
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'queue_update', queued: previews() } });
+    if (!pending.length && pendingTimer) {
+      clearInterval(pendingTimer);
+      pendingTimer = undefined;
+    }
+  }
+  function clearPending(current: ExtensionContext) {
+    if (!pending.length) return;
+    pending = [];
+    publishQueue(current);
+  }
+  function trackPending(current: ExtensionContext, text: string) {
+    pending.push({ text, observedPending: false });
+    publishQueue(current);
+    if (pendingTimer) return;
+    // Public API exposes only a boolean; clear/requeue between polls or unrelated
+    // native input needs a Pi queue-observation API for exact reconciliation.
+    pendingTimer = setInterval(() => {
+      try {
+        if (current.hasPendingMessages()) {
+          for (const item of pending) item.observedPending = true;
+        } else {
+          const next = pending.filter(item => !item.observedPending);
+          if (next.length !== pending.length) {
+            pending = next;
+            publishQueue(current);
+          }
+        }
+      } catch {
+        // A replaced context cannot publish a queue update.
+        pending = [];
+        clearInterval(pendingTimer);
+        pendingTimer = undefined;
+      }
+    }, 250);
+    pendingTimer.unref?.();
+  }
   function setQueued(current: ExtensionContext, next: string[]) {
     if (!queued.length && !next.length) return;
     queued = next;
-    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'queue_update', queued: previews() } });
+    publishQueue(current);
   }
   function sendQueued(current: ExtensionContext, texts = queued) {
-    setQueued(current, []);
-    pi.sendUserMessage(texts.join('\n\n'), { deliverAs: 'steer' });
+    const text = texts.join('\n\n');
+    const hadHeld = queued.length > 0;
+    queued = [];
+    // Idle input starts a conversation, not a native queue (and may be handled without a run).
+    if (current.isIdle()) {
+      if (hadHeld) publishQueue(current);
+    } else {
+      // Register before sendUserMessage: input handlers and native consumption can be asynchronous.
+      trackPending(current, text);
+    }
+    pi.sendUserMessage(text, { deliverAs: 'steer' });
   }
   // Mirrors Pi's own Stop, which puts queued messages back in the terminal editor.
   function restoreQueued(current: ExtensionContext) {
@@ -388,7 +438,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     },
   });
 
-  function send(message: object) {
+  function send(message: Record<string, unknown>) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
 
@@ -462,6 +512,7 @@ export default function remoteControl(pi: ExtensionAPI) {
         else setQueued(current, texts);
       } else if (command.type === 'abort' && !current.isIdle()) {
         stopped = true;
+        clearPending(current);
         current.abort();
       } else if (command.type === 'set_model' && typeof command.provider === 'string' && typeof command.modelId === 'string') {
         const model = current.modelRegistry.find(command.provider, command.modelId);
@@ -489,6 +540,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   pi.on('session_start', (_event, current) => {
+    clearPending(current);
     if (queued.length) restoreQueued(current);
     if (!ctx) return;
     ctx = current;
@@ -509,10 +561,22 @@ export default function remoteControl(pi: ExtensionAPI) {
     });
   }
   pi.on('session_tree', (_event, current) => snapshot(current));
+  pi.on('message_start', (event, current) => {
+    if (event.message.role !== 'user') return;
+    const content = event.message.content;
+    const text = typeof content === 'string' ? content : content.filter(part => part.type === 'text').map(part => part.text).join('');
+    const index = pending.findIndex(item => item.text === text);
+    if (index >= 0) {
+      pending.splice(index, 1);
+      publishQueue(current);
+    }
+  });
   for (const type of ['message_start', 'message_update', 'message_end', 'agent_start', 'agent_settled', 'ui_prompt_start', 'ui_prompt_end'] as const) {
     pi.on(type, (event, current) => {
       if (type === 'ui_prompt_start' || type === 'ui_prompt_end') waiting = type === 'ui_prompt_start';
       if (type === 'agent_start') asking = false;
+      // Handled/transformed/rejected input has no public completion event; settlement is the final bound.
+      if (type === 'agent_settled') clearPending(current);
       // Per low-level run, so keep the latest; it also catches a Stop pressed during a tool call.
       if (type === 'agent_start' || type === 'message_start') runSignal = current.signal ?? runSignal;
       if (type === 'agent_start' && queued.length && !stopped && !runSignal?.aborted) sendQueued(current);
@@ -552,7 +616,7 @@ export default function remoteControl(pi: ExtensionAPI) {
       }, 0);
     });
   }
-  pi.on('session_shutdown', stop);
+  pi.on('session_shutdown', (_event, current) => { clearPending(current); stop(); });
   // Optional chaining: hosts without pi.events (older Pi, omp) just never show background work.
   pi.events?.on('processes:changed', () => {
     if (!ctx) return;

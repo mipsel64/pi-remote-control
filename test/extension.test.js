@@ -18,7 +18,7 @@ function mockPi() {
   let name;
   return {
     handlers, commands, prompts, modelsSet, levels, renames, setModelResult: true,
-    on(type, fn) { handlers.set(type, fn); },
+    on(type, fn) { handlers.set(type, [...(handlers.get(type) ?? []), fn]); },
     registerCommand(name, command) { commands.set(name, command); },
     command(name, args, ctx) { return commands.get(name).handler(args, ctx); },
     getSessionName: () => name,
@@ -28,7 +28,7 @@ function mockPi() {
     getThinkingLevel: () => 'medium',
     setThinkingLevel(level) { levels.push(level); },
     async setModel(model) { modelsSet.push(model); return this.setModelResult; },
-    emit(type, ctx, event = { type }) { return handlers.get(type)?.(event, ctx); },
+    emit(type, ctx, event = { type }) { for (const handler of handlers.get(type) ?? []) handler(event, ctx); },
   };
 }
 const sonnet = { provider: 'anthropic', id: 'sonnet', name: 'Sonnet', reasoning: true, thinkingLevelMap: { minimal: null, xhigh: 'x' }, contextWindow: 1 };
@@ -362,6 +362,11 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   delete ctx.state.usage;
   ctx.state.entries = saved;
   const queue = async () => (await first.next(msg => msg.type === 'event' && msg.event.type === 'queue_update')).event.queued;
+  const consume = async text => {
+    pi.emit('message_start', ctx, { type: 'message_start', message: { role: 'user', content: [{ type: 'text', text }] } });
+    await first.next(msg => msg.type === 'event' && msg.event.type === 'message_start');
+    return queue();
+  };
   const settled = async () => {
     pi.emit('agent_settled', ctx);
     return (await first.next(msg => msg.type === 'event' && msg.event.type === 'agent_settled')).event;
@@ -372,12 +377,16 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   await first.next(msg => msg.type === 'event' && msg.event.type === 'agent_start');
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'steer now' }));
   await until(() => pi.prompts.length === 2);
+  assert.deepEqual(await queue(), ['steer now']);
   const long = `  aa${'😀'.repeat(130)} tail\n`;
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: long }));
   await until(() => pi.prompts.length === 3);
+  assert.deepEqual(await queue(), ['steer now', `aa${'😀'.repeat(98)}…`]);
   assert.deepEqual(pi.prompts.slice(1), [['steer now', { deliverAs: 'steer' }], [long, { deliverAs: 'steer' }]]);
   pi.emit('model_select', ctx, { type: 'model_select', model: sonnet, previousModel: sonnet, source: 'set' });
-  assert.deepEqual((await first.next(msg => msg.type === 'hello')).queued, []);
+  assert.deepEqual((await first.next(msg => msg.type === 'hello')).queued, ['steer now', `aa${'😀'.repeat(98)}…`]);
+  assert.deepEqual(await consume('steer now'), [`aa${'😀'.repeat(98)}…`]);
+  assert.deepEqual(await consume(long), []);
   assert.equal(pi.handlers.has('agent_before_settle'), false);
   delete ctx.state.signal;
   await settled();
@@ -386,16 +395,20 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   // Between low-level runs, hold the prompt until the next run can accept steering.
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'during retry' }));
   assert.deepEqual(await queue(), ['during retry']);
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'retry sibling' }));
+  assert.deepEqual(await queue(), ['during retry', 'retry sibling']);
   ctx.state.signal = new AbortController().signal;
   pi.emit('agent_start', ctx);
-  assert.deepEqual(await queue(), []);
-  assert.deepEqual(pi.prompts.at(-1), ['during retry', { deliverAs: 'steer' }]);
+  assert.deepEqual(await queue(), ['during retry retry sibling']);
+  assert.deepEqual(await consume('during retry\n\nretry sibling'), []);
+  assert.deepEqual(pi.prompts.at(-1), ['during retry\n\nretry sibling', { deliverAs: 'steer' }]);
   delete ctx.state.signal;
   // A message that arrives after the last run starts once the agent settles.
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'just in time' }));
   assert.deepEqual(await queue(), ['just in time']);
   await settled();
-  assert.deepEqual(await queue(), []);
+  assert.deepEqual(await queue(), ['just in time']);
+  assert.deepEqual(await consume('just in time'), []);
   assert.deepEqual(pi.prompts.at(-1), ['just in time', { deliverAs: 'steer' }]);
   // A manual /compact cannot accept prompts; join and send them once Pi is idle.
   first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'during compact' }));
@@ -404,8 +417,9 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   assert.deepEqual(await queue(), ['during compact', `aa${'😀'.repeat(98)}…`]);
   ctx.state.idle = true;
   pi.emit('session_compact', ctx, { type: 'session_compact' });
+  const combined = `during compact\n\n${long}`;
   assert.deepEqual(await queue(), []);
-  assert.deepEqual(pi.prompts.at(-1), [`during compact\n\n${long}`, { deliverAs: 'steer' }]);
+  assert.deepEqual(pi.prompts.at(-1), [combined, { deliverAs: 'steer' }]);
   ctx.state.idle = false;
 
   // Stop restores only the extension-held queue; Pi owns native steering restoration.
@@ -462,6 +476,30 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   assert.equal(JSON.parse(parts.join(''))[0].message.content, huge);
   parts = [];
   ctx.state.entries = [{ type: 'message', id: 'old' }, { type: 'message', id: 'next' }];
+
+  let tick, cancelled = false;
+  const timer = { unref() {} };
+  const interval = t.mock.method(global, 'setInterval', callback => { tick = callback; return timer; });
+  const cancel = t.mock.method(global, 'clearInterval', value => { assert.equal(value, timer); cancelled = true; });
+  ctx.state.idle = false;
+  ctx.state.signal = new AbortController().signal;
+  first.ws.send(JSON.stringify({ type: 'prompt', sessionId: 's1', text: 'invalidated context' }));
+  assert.deepEqual(await queue(), ['invalidated context']);
+  const sessionId = ctx.sessionManager.getSessionId;
+  const pendingMessages = ctx.hasPendingMessages;
+  ctx.sessionManager.getSessionId = () => { throw new Error('Invalidated context'); };
+  ctx.hasPendingMessages = () => { throw new Error('Invalidated context'); };
+  try {
+    assert.doesNotThrow(tick);
+    assert.ok(cancelled, 'invalidated context stops its pending timer without publishing');
+  } finally {
+    ctx.sessionManager.getSessionId = sessionId;
+    ctx.hasPendingMessages = pendingMessages;
+    interval.mock.restore();
+    cancel.mock.restore();
+  }
+  ctx.state.idle = true;
+  delete ctx.state.signal;
   const reconnected = once(wss, 'connection');
   assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
   first.ws.terminate();
@@ -472,6 +510,7 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   assert.equal(ctx.state.notices.filter(([message]) => message === 'Remote control connected').length, 1);
   assert.equal(reconnectMessages.find(msg => msg.type === 'hello').processId, hello.processId);
   assert.equal(reconnectMessages.find(msg => msg.type === 'snapshot').entries.length, 2);
+  assert.deepEqual(reconnectMessages.find(msg => msg.type === 'hello').queued, []);
   assert.deepEqual(ctx.state.statuses.at(-1), ['rc', '/rc connected']);
   const closed = once(again, 'close');
   pi.emit('session_shutdown', ctx);

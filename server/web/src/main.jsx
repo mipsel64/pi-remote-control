@@ -804,7 +804,7 @@ function App() {
           <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}><BackgroundJob job={job} now={now} /></li>)}</ul>
         </details>}
         {active && item.queued?.length > 0 && <div className="queue">
-          <div className="queue-label">{item.queued.length > 1 ? 'queued · sent as one message' : 'queued'}</div>
+          <div className="queue-label">queued</div>
           <ol aria-label="Queued messages">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
         </div>}
         <form id="composer" onSubmit={prompt}><label htmlFor="prompt" className="sr-only">Message</label>
