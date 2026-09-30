@@ -214,7 +214,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Tracked while disconnected too, so a reconnect during an open dialog still reports it.
   let waiting = false;
   let asking = false;
-  // Held here instead of Pi's queue, which extensions cannot edit, so later prompts join the waiting one.
+  // Pi rejects prompts during manual compaction; only hold them between active runs.
   // Kept across /rc close: the run still settles and delivers it.
   let queued: string[] = [];
   let stopped = false;
@@ -281,8 +281,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
   function sendQueued(current: ExtensionContext, texts = queued) {
     setQueued(current, []);
-    // followUp is ignored while Pi is idle, and still queues safely if another prompt started first.
-    pi.sendUserMessage(texts.join('\n\n'), { deliverAs: 'followUp' });
+    pi.sendUserMessage(texts.join('\n\n'), { deliverAs: 'steer' });
   }
   // Mirrors Pi's own Stop, which puts queued messages back in the terminal editor.
   function restoreQueued(current: ExtensionContext) {
@@ -459,7 +458,7 @@ export default function remoteControl(pi: ExtensionAPI) {
       else if (command.type === 'models') send({ type: 'models', processId: entryId(current), sessionId: command.sessionId, models: modelList(current) });
       else if (command.type === 'prompt' && typeof command.text === 'string' && command.text.trim() && Buffer.byteLength(command.text) <= 16 * 1024) {
         const texts = [...queued, command.text];
-        if (current.isIdle()) sendQueued(current, texts);
+        if (!stopped && (current.isIdle() || current.signal?.aborted === false)) sendQueued(current, texts);
         else setQueued(current, texts);
       } else if (command.type === 'abort' && !current.isIdle()) {
         stopped = true;
@@ -516,6 +515,7 @@ export default function remoteControl(pi: ExtensionAPI) {
       if (type === 'agent_start') asking = false;
       // Per low-level run, so keep the latest; it also catches a Stop pressed during a tool call.
       if (type === 'agent_start' || type === 'message_start') runSignal = current.signal ?? runSignal;
+      if (type === 'agent_start' && queued.length && !stopped && !runSignal?.aborted) sendQueued(current);
       const usage = type === 'message_end' || type === 'agent_settled' ? contextUsage(current) : null;
       let payload: object = usage ? { ...event, contextUsage: usage } : event;
       if (type === 'agent_settled') {
@@ -529,7 +529,7 @@ export default function remoteControl(pi: ExtensionAPI) {
       if (ctx && type === 'agent_settled' && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
       send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
       if (type === 'agent_settled') {
-        // A Stop skips agent_before_settle; otherwise the prompt arrived after it, and Pi defers a prompt sent now past settling.
+        // Native steering is owned by Pi; only restore prompts held between runs here.
         if (queued.length && (stopped || runSignal?.aborted)) restoreQueued(current);
         else if (queued.length) sendQueued(current);
         stopped = false;
@@ -537,20 +537,18 @@ export default function remoteControl(pi: ExtensionAPI) {
       }
     });
   }
-  // Awaited while Pi is still streaming, so a follow-up queued here continues this run natively.
-  // ponytail: a slow Pi input handler can still submit it after a Stop pressed meanwhile, as with any extension prompt.
-  pi.on('agent_before_settle', async (event, current) => {
-    if (!queued.length || event.outcome === 'aborted' || stopped) return;
-    sendQueued(current);
-    // sendUserMessage queues asynchronously (input handlers first); Pi checks its queue once this resolves.
-    for (let tries = 0; tries < 100 && !current.hasPendingMessages(); tries++) await new Promise(resolve => setTimeout(resolve, 10));
-  });
   // A manual /compact is not an agent run; Pi goes idle right after this event, so deliver on the next tick.
   for (const type of ['session_compact', 'session_compact_failed'] as const) {
     pi.on(type, (_event, current) => {
       setTimeout(() => {
-        try { if (queued.length && current.isIdle()) sendQueued(current); }
-        catch { /* The runtime was replaced (/reload, /new) before the tick. */ }
+        try {
+          if (!current.isIdle()) return;
+          if (queued.length) {
+            if (stopped) restoreQueued(current);
+            else sendQueued(current);
+          }
+          stopped = false;
+        } catch { /* The runtime was replaced (/reload, /new) before the tick. */ }
       }, 0);
     });
   }

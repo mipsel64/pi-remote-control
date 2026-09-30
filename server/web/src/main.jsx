@@ -805,18 +805,18 @@ function App() {
         </details>}
         {active && item.queued?.length > 0 && <div className="queue">
           <div className="queue-label">{item.queued.length > 1 ? 'queued · sent as one message' : 'queued'}</div>
-          <ol aria-label="Queued follow-ups">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
+          <ol aria-label="Queued messages">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
         </div>}
         <form id="composer" onSubmit={prompt}><label htmlFor="prompt" className="sr-only">Message</label>
           <textarea id="prompt" ref={input} rows="1" value={text} onChange={event => setText(event.target.value)} onKeyDown={onPromptKey} disabled={!active}
-            placeholder={!item ? 'Select a session' : !socketOpen ? 'Reconnecting…' : !item.online ? 'Offline — showing last saved conversation' : busy ? 'Queue a follow-up ...' : 'Write a message ...'} />
+            placeholder={!item ? 'Select a session' : !socketOpen ? 'Reconnecting…' : !item.online ? 'Offline — showing last saved conversation' : busy ? 'Steer the agent ...' : 'Write a message ...'} />
           <div className="composer-actions">
             {/* Remounting on session switch, offline, or socket drop closes the menu. */}
             <ModelMenu key={renameKey} picker={modelPicker(item, history.models[item?.processId], history.optimistic[item?.processId])} enabled={active} onOpen={refreshModels} onModel={changeModel} onThinking={changeThinking} />
             {usage && <span className="usage" title={usage.title}><span className="sr-only">Context and cost: </span>{usage.text}</span>}
             {busy && !text.trim()
               ? <button key="abort" id="abort" type="button" className="cmd" aria-label="Stop" onClick={abort}><svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor" /></svg></button>
-              : <button key="send" id="send" type="submit" className="cmd" aria-label={busy ? 'Send follow-up' : 'Send message'} disabled={!active || !text.trim()}><Icon><path d="M12 19V5M5 12l7-7 7 7" /></Icon></button>}
+              : <button key="send" id="send" type="submit" className="cmd" aria-label={busy ? 'Send steering message' : 'Send message'} disabled={!active || !text.trim()}><Icon><path d="M12 19V5M5 12l7-7 7 7" /></Icon></button>}
           </div>
         </form>
       </div>
