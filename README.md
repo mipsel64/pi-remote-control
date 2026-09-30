@@ -61,6 +61,10 @@ To tell several servers apart on the Home Screen, pick an **App icon** colour in
 
 Pi shows a one-time "Remote control connected" notice when `/rc` connects, and the footer shows `/rc connected` in green, or a warning while it retries (automatic reconnects are silent). Attach again after `/new` to add the new session to the list.
 
+Web-submitted steering during a run appears under **queued** until Pi consumes it; prompts held during compaction/retry gaps are shown there too. Idle Send goes straight into the conversation without a pending row. This is a display, not a second delivery queue. Stop clears the display; Pi keeps ownership of native queue/editor restoration. Browser and agent reconnects retain pending previews in the same extension runtime.
+
+Pi's extension API exposes only whether native messages are pending, not their contents or dequeue events. The extension checks that flag every 250 ms while previews exist and reconciles confirmed pending entries when the native queue stays empty. Terminal dequeue/edit can therefore lag by a poll; clear-and-requeue between polls, or unrelated terminal messages still pending, can leave a preview until consumption or run settlement. Inputs transformed/handled by other extensions cannot be matched exactly during a continuing run; unconfirmed previews clear when it settles. Reloading the extension resets its display ledger. Terminal-only submissions are not mirrored in this list.
+
 ## Configuration
 
 Config files must be mode `0600`. Restart `prc` after changing `config.json`, and run `/rc close` then `/rc` in Pi after changing either file.
@@ -145,9 +149,14 @@ Tap the **bell** in the top-right corner to be notified whenever a prompt finish
 npm test                                               # extension
 npm --prefix server/web test                           # web UI (also builds it)
 cargo test --manifest-path server/Cargo.toml --locked  # server
+npm ci && npm --prefix server/web ci                   # E2E prerequisites
+npx playwright install chromium                       # CI/Linux: add --with-deps
+npm run test:e2e                                       # builds real web/relay, drives Chromium + Pi SDK
 make build                                             # server/target/release/prc
 make serve REBUILD=1                                   # build and run in the foreground
 ```
+
+The E2E test uses the pinned local Pi SDK and a deterministic, gated provider/tool, without live credentials or provider requests. It starts only a loopback relay with temporary config/state and an isolated in-memory Pi session, and cleans them up. It exercises login/composer, multiple and identical steering prompts, browser/agent reconnect, consumption before settlement, delayed/handled input (including idle input that starts no run), Stop, and the public native `clearQueue()`/edit path. Stop's editor adapter is checked; actual terminal rendering and dequeue keybindings are not. Manual compaction/retry safety remains covered by the extension unit tests, not this browser E2E. The existing CI server job also runs the E2E regression guard after installing Chromium.
 
 To release, set the same version in `package.json` and `server/Cargo.toml`, update both lockfiles, merge, and push a `vX.Y.Z` tag. CI then builds the binaries, the GHCR image, the npm package, and the GitHub release; tags such as `v1.0.0-rc.1` become prereleases. Before the first release, create the free npm organization `mipsel64` (it owns the `@mipsel64` scope), publish `@mipsel64/pi-remote-control` once by hand (`npm publish --access public`), and add npm trusted publishing for `release.yml`.
 
