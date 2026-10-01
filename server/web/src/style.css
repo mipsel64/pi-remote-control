@@ -114,6 +114,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .msg.user { align-self: flex-end; max-width: 85%; padding: .625rem 1rem; border-radius: 1rem; background: var(--muted); color: var(--foreground); white-space: pre-wrap; }
 .msg.assistant { display: flex; flex-direction: column; gap: .75rem; }
 .msg.assistant > .md { color: var(--foreground); }
+.message-time { display: block; color: var(--muted-foreground); font-size: .75rem; font-variant-numeric: tabular-nums; line-height: 1.5; white-space: normal; }
+.msg.user .message-time { margin-top: .25rem; text-align: right; }
 .md { overflow-wrap: anywhere; }
 .md > * { margin: 0 0 .75rem; }
 .md > :last-child { margin-bottom: 0; }

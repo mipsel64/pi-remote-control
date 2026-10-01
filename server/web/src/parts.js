@@ -19,7 +19,7 @@ export function buildThread(entries, stream) {
   const messages = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (entry?.type === 'message' && entry.message && typeof entry.message === 'object') {
-      if (entry.message.role !== 'system') messages.push([entry.message, false]);
+      if (entry.message.role !== 'system') messages.push([entry.message, false, entry.timestamp]);
     }
     else if (entry?.type === 'custom_message' && entry.display)
       messages.push([{ role: 'custom', customType: entry.customType, content: entry.content }, false]);
@@ -31,10 +31,11 @@ export function buildThread(entries, stream) {
     ? message.content.filter(part => part?.type === 'toolCall' && part.id).map(part => part.id) : []));
   const results = new Map(messages.filter(([message]) => message.role === 'toolResult' && calls.has(message.toolCallId))
     .map(([message]) => [message.toolCallId, message]));
-  return messages.flatMap(([message, streaming]) => {
+  return messages.flatMap(([message, streaming, entryTimestamp]) => {
     const role = typeof message.role === 'string' ? message.role : 'message';
-    if (role === 'user') return [{ kind: 'user', parts: normalizeParts(message.content) }];
-    if (role === 'assistant') return [{ kind: 'assistant', streaming, error: typeof message.errorMessage === 'string' ? message.errorMessage : '',
+    const timestamp = message.timestamp ?? entryTimestamp;
+    if (role === 'user') return [{ kind: 'user', timestamp, parts: normalizeParts(message.content) }];
+    if (role === 'assistant') return [{ kind: 'assistant', timestamp, streaming, error: typeof message.errorMessage === 'string' ? message.errorMessage : '',
       parts: normalizeParts(message.content).map(part => part.type === 'toolCall' ? { ...part, result: part.id ? results.get(part.id) : undefined } : part) }];
     if (role === 'toolResult') return results.has(message.toolCallId) ? [] :
       [{ kind: 'tool', call: { name: typeof message.toolName === 'string' && message.toolName ? message.toolName : 'tool', result: message } }];
@@ -78,6 +79,16 @@ export const workingLabel = (running, since, now, offset = 0) =>
 
 export const isBashTool = name => typeof name === 'string' && name.toLowerCase() === 'bash';
 export const toolStatus = (result, live) => result?.isError ? 'error' : result ? 'done' : live ? 'pending' : 'incomplete';
+
+const messageTimeFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+const messageTimeTitle = new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'long' });
+export function messageTime(timestamp) {
+  if (typeof timestamp !== 'number' && typeof timestamp !== 'string') return null;
+  const date = new Date(timestamp);
+  return Number.isFinite(date.getTime())
+    ? { dateTime: date.toISOString(), label: messageTimeFormat.format(date), title: messageTimeTitle.format(date) }
+    : null;
+}
 
 export function relativeTime(ms, now = Date.now()) {
   if (!Number.isFinite(ms) || ms <= 0) return '';
