@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME, folderName, initialHistory, matchSession, pinFirst, needsHomeScreen, receive, selectSession, sessionNotice, sessionStatus, statusLabel, swipeAction, appHeight } from './history.js';
-import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, modelPicker, modelTrigger, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from './parts.js';
+import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, messageTime, modelPicker, modelTrigger, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import ICON_COLORS from './icon-colors.json';
 import '@fontsource-variable/geist-mono';
@@ -119,8 +119,13 @@ function BackgroundJob({ job, now }) {
   </button>;
 }
 
+function MessageTime({ timestamp }) {
+  const time = messageTime(timestamp);
+  return time && <time className="message-time" dateTime={time.dateTime} title={time.title} aria-label={time.title}>{time.label}</time>;
+}
+
 function Item({ item, live }) {
-  if (item.kind === 'user') return <div className="msg user"><Parts parts={item.parts} /></div>;
+  if (item.kind === 'user') return <div className="msg user"><Parts parts={item.parts} /><MessageTime timestamp={item.timestamp} /></div>;
   if (item.kind === 'assistant') return <div className="msg assistant">
     {item.parts.map((part, index) => part.type === 'text' ? <Text key={index} text={part.text} /> :
       part.type === 'thinking' ? <details key={index} className="reasoning" open={item.streaming}>
@@ -130,6 +135,7 @@ function Item({ item, live }) {
       <span key={index} className="chip">[image]</span>)}
     {item.streaming && !item.parts.length && <span className="typing"><span className="sr-only">Pi is responding</span></span>}
     {item.error && <p className="msg-error">{item.error}</p>}
+    <MessageTime timestamp={item.timestamp} />
   </div>;
   if (item.kind === 'tool') return <ToolCard call={item.call} live={false} />;
   if (item.kind === 'bash') return <Terminal command={item.command} output={item.output} exitCode={item.exitCode} />;

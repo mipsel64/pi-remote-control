@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { backgroundSummary, buildThread, groupModels, levelLabel, matchModel, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from '../src/parts.js';
+import { backgroundSummary, buildThread, groupModels, levelLabel, matchModel, messageTime, modelKey, modelOption, modelPicker, modelTrigger, normalizeParts, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from '../src/parts.js';
 import { Markdown } from '../src/markdown.js';
 
 const message = message => ({ type: 'message', message });
@@ -74,6 +74,31 @@ test('buildThread renders raw Pi compaction and branch-summary entries', () => {
   const items = buildThread([{ type: 'compaction', summary: 'earlier work' }, { type: 'branch_summary', summary: 'other path' }, { type: 'label', label: 'x' }]);
   assert.deepEqual(items.map(item => [item.kind, item.label, item.text]),
     [['summary', 'Context compacted', 'earlier work'], ['summary', 'Branch summarized', 'other path']]);
+});
+
+test('message timestamps survive history, entry fallback, and live streaming without inventing times', () => {
+  const stamp = Date.parse('2026-09-30T15:20:12Z');
+  const entryTime = '2026-09-30T15:21:00Z';
+  const user = Object.freeze({ role: 'user', content: 'hi', timestamp: stamp });
+  const items = buildThread([
+    { type: 'message', timestamp: entryTime, message: user },
+    { type: 'message', timestamp: entryTime, message: { role: 'assistant', content: [] } },
+    message({ role: 'user', content: 'legacy' })
+  ], { message: { role: 'assistant', content: [], timestamp: stamp + 1000 }, ended: false });
+  assert.deepEqual(items.map(item => item.timestamp), [stamp, entryTime, undefined, stamp + 1000]);
+  assert.equal(items[3].streaming, true);
+});
+
+test('messageTime formats original timestamps locally and hides missing or invalid values', () => {
+  const date = new Date('2026-09-30T15:20:12Z');
+  const time = messageTime(date.getTime());
+  assert.equal(time.dateTime, date.toISOString());
+  assert.equal(time.label, new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date));
+  assert.equal(time.title, new Intl.DateTimeFormat(undefined, { dateStyle: 'full', timeStyle: 'long' }).format(date));
+  assert.deepEqual(messageTime(date.toISOString()), time);
+  assert.equal(messageTime(0).dateTime, '1970-01-01T00:00:00.000Z');
+  for (const value of [undefined, null, '', 'not a date', NaN, Infinity, 1e20, false, {}, [], Symbol('time')])
+    assert.equal(messageTime(value), null);
 });
 
 test('toolSummary picks the first useful argument and summarizes task tools', () => {

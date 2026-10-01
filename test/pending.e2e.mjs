@@ -72,6 +72,7 @@ function controlledProvider() {
             timestamp: Date.now(), content: [], stopReason: 'stop',
             usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+          call.timestamp = message.timestamp;
           void (async () => {
             try {
               await waitGate(call, options?.signal);
@@ -87,6 +88,7 @@ function controlledProvider() {
                 stream.push({ type: 'text_start', contentIndex: 0, partial: message });
                 message.content[0].text = 'Controlled reply';
                 stream.push({ type: 'text_delta', contentIndex: 0, delta: 'Controlled reply', partial: message });
+                if (call.partial) await waitGate(call.partial, options?.signal);
                 stream.push({ type: 'text_end', contentIndex: 0, content: 'Controlled reply', partial: message });
               }
               stream.push({ type: 'done', reason: message.stopReason, message });
@@ -168,7 +170,7 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(errors, []);
   browser = await chromium.launch();
-  const page = await browser.newPage({ serviceWorkers: 'block' });
+  const page = await browser.newPage({ serviceWorkers: 'block', locale: 'en-US', timezoneId: 'Asia/Bangkok' });
   page.setDefaultTimeout(WAIT_TIMEOUT);
   t.after(async () => { if (!t.passed) t.diagnostic(JSON.stringify({ relayLog, errors, notices })); });
   await page.goto(origin);
@@ -194,7 +196,19 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
     return provider.tools[toolIndex];
   };
 
+  const checkTime = async (item, timestamp) => {
+    const time = item.locator('time.message-time');
+    await expect(time).toHaveAttribute('datetime', new Date(timestamp).toISOString());
+    await expect(time).toBeVisible();
+    const label = await page.evaluate(stamp => new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(stamp), timestamp);
+    await expect(time).toHaveText(label);
+  };
   const tool = await startToolRun('start visibility run');
+  const firstUser = session.messages.find(message => message.role === 'user');
+  const firstAssistant = session.messages.find(message => message.role === 'assistant');
+  const userItem = page.locator('.msg.user').filter({ hasText: 'start visibility run' });
+  await checkTime(userItem, firstUser.timestamp);
+  await checkTime(page.locator('.msg.assistant').first(), firstAssistant.timestamp);
   await submit('web steering one');
   await until(() => session.getSteeringMessages().length === 1, 'first native steering enqueued');
   assert.deepEqual(session.getSteeringMessages(), ['web steering one']);
@@ -205,6 +219,13 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
   await expect(pending).toHaveText(['web steering one', 'web steering two']);
   await page.reload();
   await expect(pending).toHaveText(['web steering one', 'web steering two']);
+  await checkTime(userItem, firstUser.timestamp);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await checkTime(userItem, firstUser.timestamp);
+  assert.ok(await page.locator('#history').evaluate(node => node.scrollWidth <= node.clientWidth), 'timestamps do not overflow a phone viewport');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.setViewportSize({ width: 1280, height: 720 });
   // Reconnect the actual extension too; hello must include native display entries.
   await session.prompt('/rc close');
   await session.prompt('/rc');
@@ -220,8 +241,13 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
   await until(() => provider.calls.length === 3, 'second steering consumed');
   await expect(pending).toHaveCount(0);
   assert.equal(settled, before);
+  provider.calls[2].partial = deferred();
   provider.calls[2].resolve();
+  const liveItem = page.locator('.msg.assistant').filter({ hasText: 'Controlled reply' }).last();
+  await checkTime(liveItem, provider.calls[2].timestamp);
+  provider.calls[2].partial.resolve();
   await session.waitForIdle();
+  await checkTime(liveItem, provider.calls[2].timestamp);
   for (const text of ['web steering one', 'web steering two']) {
     assert.equal(session.messages.filter(message => message.role === 'user' && message.content.some(block => block.type === 'text' && block.text === text)).length, 1);
   }
