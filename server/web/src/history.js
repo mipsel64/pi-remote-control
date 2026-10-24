@@ -25,7 +25,13 @@ export const buildAsset = html => /src="(\/assets\/index-[^"]+\.js)"/.exec(Strin
 // Mirrors the server's push body.
 function noticeBody(event) {
   const text = (value, max) => typeof value === 'string' ? value.trim().slice(0, max) : '';
-  if (event?.type === 'agent_settled') return text(event.summary, 200) || 'Finished responding';
+  if (event?.type === 'agent_settled' || (event?.type === 'agent_end' && event.willContinue !== true && event.awaitingAsyncWork !== true))
+    return text(event.summary, 200) || 'Finished responding';
+  if (event?.type === 'ask_update' && event.ask) {
+    const question = event.ask.questions?.[0];
+    const title = text(question?.header || question?.question, 120);
+    return title ? `Needs your input: ${title}` : 'Needs your input';
+  }
   if (event?.type !== 'ui_prompt_start') return null;
   const title = text(event.title, 120);
   return title ? `Needs your input: ${title}` : 'Needs your input';

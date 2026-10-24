@@ -8,16 +8,28 @@ const { execFileSync } = require('node:child_process');
 const { WebSocketServer } = require('ws');
 
 const load = () => import('../extensions/remote-control.ts').then(module => module.default);
-function mockPi() {
+const nativeParameters = { schema: 'native ask' };
+const nativeAsk = {
+  name: 'ask', label: 'Native Ask', description: 'native ask', parameters: nativeParameters,
+  promptSnippet: 'Native ask snippet', promptGuidelines: ['Use native ask'], examples: [{ questions: [] }],
+  renderCall: () => 'native call', renderResult: () => 'native result',
+  approval: 'read', strict: true, concurrency: 'exclusive', loadMode: 'discoverable',
+  sourceInfo: { source: 'builtin' }, execute: () => { throw new Error('native execute must be wrapped'); },
+};
+function mockPi(omp = false) {
   const handlers = new Map();
   const commands = new Map();
   const prompts = [];
   const modelsSet = [];
   const levels = [];
   const renames = [];
+  const tools = new Map();
   let name;
   return {
-    handlers, commands, prompts, modelsSet, levels, renames, setModelResult: true,
+    handlers, commands, prompts, modelsSet, levels, renames, tools, setModelResult: true,
+    // omp injects schema builders and lists its native tools; Pi has neither.
+    ...(omp && { arktype: {}, registerTool: tool => tools.set(tool.name, tool),
+      getAllTools: () => [nativeAsk] }),
     on(type, fn) { handlers.set(type, [...(handlers.get(type) ?? []), fn]); },
     registerCommand(name, command) { commands.set(name, command); },
     command(name, args, ctx) { return commands.get(name).handler(args, ctx); },
@@ -807,4 +819,486 @@ test('background shells and subagents come from other extensions over pi.events'
   await until(() => updates().length === 7);
   assert.deepEqual(updates()[6].map(item => item.kind).filter(kind => kind === 'shell').length, 19);
   assert.equal(updates()[6].at(-1).label, 'scout');
+});
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const settledWithin = (promise, ms) => Promise.race([promise.then(() => 'settled', () => 'settled'), delay(ms).then(() => 'pending')]);
+
+// A connected extension runtime. omp stands in for a host that emits agent_end (never agent_settled) and can re-register native tools.
+async function attached(t, { omp = false, beforeAttach } = {}) {
+  const wss = new WebSocketServer({ port: 0 });
+  await once(wss, 'listening');
+  const previous = [process.env.PI_RC_URL, process.env.PI_RC_AGENT_TOKEN];
+  process.env.PI_RC_URL = `ws://127.0.0.1:${wss.address().port}/agent`;
+  process.env.PI_RC_AGENT_TOKEN = 'secret';
+  const pi = mockPi(omp);
+  const ctx = context();
+  t.after(() => new Promise(resolve => {
+    pi.emit('session_shutdown', ctx);
+    if (previous[0] === undefined) delete process.env.PI_RC_URL; else process.env.PI_RC_URL = previous[0];
+    if (previous[1] === undefined) delete process.env.PI_RC_AGENT_TOKEN; else process.env.PI_RC_AGENT_TOKEN = previous[1];
+    for (const ws of wss.clients) ws.terminate();
+    wss.close(resolve);
+  }));
+  (await load())(pi);
+  pi.emit('session_start', ctx);
+  await beforeAttach?.(pi, ctx);
+  const connected = once(wss, 'connection');
+  pi.command('rc', '', ctx);
+  const [ws] = await connected;
+  const messages = [];
+  ws.on('message', raw => messages.push(JSON.parse(raw.toString())));
+  async function until(check) {
+    for (let i = 0; i < 200; i++) {
+      if (check()) return;
+      await delay(10);
+    }
+    throw new Error('Timed out waiting for WS message');
+  }
+  const hellos = () => messages.filter(msg => msg.type === 'hello');
+  const events = type => messages.filter(msg => msg.type === 'event' && msg.event.type === type).map(msg => msg.event);
+  // session_info_changed makes the extension send a fresh hello.
+  async function hello() {
+    const count = hellos().length;
+    pi.emit('session_info_changed', ctx);
+    await until(() => hellos().length > count);
+    return hellos().at(-1);
+  }
+  await until(() => hellos().length === 1);
+  return { pi, ctx, ws, wss, messages, until, hellos, events, hello, send: message => ws.send(JSON.stringify({ sessionId: 's1', ...message })) };
+}
+
+test('omp ask override is opt-in and preserves all exposed native metadata', async t => {
+  const { pi } = await attached(t, { omp: true, beforeAttach: async (pi, ctx) => {
+    assert.equal(pi.tools.size, 0);
+    await pi.command('rc', 'status', ctx);
+    assert.equal(pi.tools.size, 0);
+  } });
+  const tool = pi.tools.get('ask');
+  for (const key of ['name', 'label', 'description', 'parameters', 'promptSnippet', 'promptGuidelines', 'examples',
+    'renderCall', 'renderResult', 'approval', 'strict', 'concurrency', 'loadMode', 'sourceInfo'])
+    assert.equal(tool[key], nativeAsk[key], key);
+  assert.notEqual(tool.execute, nativeAsk.execute);
+});
+
+test('omp final agent_end settles once without forwarding messages or a duplicate agent_end', async t => {
+  const { pi, ctx, hello, events, messages, until } = await attached(t, { omp: true });
+  // omp's isIdle() is also false between continuations and during compaction.
+  ctx.state.idle = false;
+  assert.equal((await hello()).busy, false);
+  pi.emit('agent_start', ctx);
+  assert.equal((await hello()).busy, true);
+  for (const flags of [{ willContinue: true }, { willContinue: true, awaitingAsyncWork: true }, { awaitingAsyncWork: true }]) {
+    pi.emit('agent_end', ctx, { type: 'agent_end', messages: [{ role: 'assistant', content: 'DO_NOT_FORWARD' }], ...flags });
+    assert.equal((await hello()).busy, true);
+  }
+  assert.equal(events('agent_settled').length, 0);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [{ role: 'assistant', content: 'DO_NOT_FORWARD' }] });
+  assert.equal((await hello()).busy, false);
+  await until(() => events('agent_settled').length === 1);
+  assert.equal(events('agent_end').length, 0);
+  assert.deepEqual(events('agent_settled'), [{ type: 'agent_settled', asking: false }]);
+  assert.equal(JSON.stringify(messages).includes('DO_NOT_FORWARD'), false);
+});
+
+test('omp idle watcher settles missing finals after continuation or retry and ignores stale watchers', async t => {
+  const { pi, ctx, hello, events, until } = await attached(t, { omp: true });
+  for (const flags of [{ willContinue: true }, { awaitingAsyncWork: true }]) {
+    ctx.state.idle = false;
+    pi.emit('agent_start', ctx);
+    pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], ...flags });
+    ctx.state.idle = true;
+    const count = events('agent_settled').length + 1;
+    await until(() => events('agent_settled').length === count);
+    assert.equal((await hello()).busy, false);
+  }
+
+  // A continuation that does start invalidates the previous run's idle callback.
+  ctx.state.idle = false;
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+  pi.emit('agent_start', ctx);
+  await delay(20);
+  assert.equal(events('agent_settled').length, 2);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [] });
+  await until(() => events('agent_settled').length === 3);
+  await delay(20);
+  assert.equal(events('agent_settled').length, 3);
+});
+
+test('omp compaction tick settles an abandoned run, but compaction alone is not a run', async t => {
+  const { pi, ctx, hello, events, until } = await attached(t, { omp: true });
+  ctx.state.idle = true;
+  pi.emit('session_compact', ctx, { type: 'session_compact' });
+  await delay(20);
+  assert.equal(events('agent_settled').length, 0);
+  assert.equal((await hello()).busy, false);
+
+  ctx.state.idle = false;
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], awaitingAsyncWork: true });
+  pi.emit('session_compact', ctx, { type: 'session_compact' });
+  ctx.state.idle = true;
+  pi.emit('session_compact', ctx, { type: 'session_compact' });
+  await until(() => events('agent_settled').length === 1);
+  assert.equal((await hello()).busy, false);
+});
+
+test('omp session switch and branch clear stale run state and restore held prompts', async t => {
+  const { pi, ctx, hellos, events, until, send } = await attached(t, { omp: true });
+  for (const type of ['session_switch', 'session_branch']) {
+    ctx.state.idle = false;
+    pi.emit('agent_start', ctx);
+    pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+    pi.emit('ui_prompt_start', ctx, { type: 'ui_prompt_start' });
+    send({ type: 'abort' });
+    send({ type: 'prompt', text: `held ${type}` });
+    await until(() => events('queue_update').at(-1)?.queued.length === 1);
+    ctx.state.idle = true;
+    const count = hellos().length;
+    pi.emit(type, ctx, { type });
+    await until(() => hellos().length > count);
+    assert.equal(hellos().at(-1).busy, false);
+    assert.equal(hellos().at(-1).waiting, false);
+    assert.deepEqual(hellos().at(-1).queued, []);
+    assert.match(ctx.state.editor, new RegExp(`held ${type}`));
+    send({ type: 'prompt', text: `after ${type}` });
+    await until(() => pi.prompts.at(-1)?.[0] === `after ${type}`);
+  }
+  assert.equal(events('agent_settled').length, 0);
+});
+
+test('omp aborted final assistant restores held prompts instead of auto-sending them', async t => {
+  const { pi, ctx, events, until, send } = await attached(t, { omp: true });
+  ctx.state.idle = false;
+  ctx.state.editor = 'draft';
+  pi.emit('agent_start', ctx);
+  send({ type: 'prompt', text: 'held after abort' });
+  await until(() => events('queue_update').at(-1)?.queued.length === 1);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'aborted', content: 'DO_NOT_FORWARD' }] });
+  await until(() => events('agent_settled').length === 1);
+  assert.equal(ctx.state.editor, 'held after abort\n\ndraft');
+  assert.equal(pi.prompts.length, 0);
+  assert.deepEqual(events('queue_update').at(-1).queued, []);
+  assert.equal(events('agent_end').length, 0);
+
+  pi.emit('agent_start', ctx);
+  send({ type: 'prompt', text: 'send after normal completion' });
+  await until(() => events('queue_update').at(-1)?.queued.includes('send after normal completion'));
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [{ role: 'assistant', stopReason: 'stop', content: 'done' }] });
+  await until(() => events('agent_settled').length === 2);
+  assert.deepEqual(pi.prompts, [['send after normal completion', { deliverAs: 'steer' }]]);
+});
+
+test('omp hello reconciles stale busy with isIdle without treating compaction as a run', async t => {
+  const { pi, ctx, hello } = await attached(t, { omp: true });
+  ctx.state.idle = false;
+  assert.equal((await hello()).busy, false);
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+  assert.equal((await hello()).busy, true);
+  ctx.state.idle = true;
+  assert.equal((await hello()).busy, false);
+
+});
+
+test('omp idle watcher keeps watching while a scheduled continuation stays non-idle', async t => {
+  const { pi, ctx, hello, events, until } = await attached(t, { omp: true });
+  ctx.state.idle = false;
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+  // omp stays busy past the first tick without emitting another agent_start.
+  await delay(250);
+  assert.equal(events('agent_settled').length, 0);
+  assert.equal((await hello()).busy, true);
+  // The continuation finishes without a final agent_end.
+  ctx.state.idle = true;
+  await until(() => events('agent_settled').length === 1);
+  await delay(250);
+  assert.equal(events('agent_settled').length, 1);
+
+  // A new run stops the watch; its own final agent_end settles exactly once.
+  ctx.state.idle = false;
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+  await delay(150);
+  pi.emit('agent_start', ctx);
+  ctx.state.idle = true;
+  await delay(250);
+  assert.equal(events('agent_settled').length, 1);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [] });
+  await until(() => events('agent_settled').length === 2);
+
+  // Session replacement stops the watch too.
+  ctx.state.idle = false;
+  pi.emit('agent_start', ctx);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [], willContinue: true });
+  await delay(150);
+  pi.emit('session_switch', ctx, { type: 'session_switch' });
+  ctx.state.idle = true;
+  await delay(250);
+  assert.equal(events('agent_settled').length, 2);
+});
+
+test('omp session switch and branch to another session reconnect instead of rebinding the socket', async t => {
+  const { pi, ctx, ws, wss, messages, hellos, until } = await attached(t, { omp: true });
+  // Like the server: a connection belongs to the processId of its first hello and rejects any other.
+  const bound = [];
+  const track = (socket, received) => {
+    const entry = { socket, received, processId: undefined, closed: false };
+    socket.on('close', () => { entry.closed = true; });
+    bound.push(entry);
+    return entry;
+  };
+  const first = track(ws, messages);
+  first.processId = hellos()[0].processId;
+  let previous = first;
+  for (const [type, id] of [['session_switch', 's2'], ['session_branch', 's3']]) {
+    const connected = once(wss, 'connection');
+    const sentBefore = previous.received.length;
+    ctx.state.id = id;
+    pi.emit(type, ctx, { type });
+    const [socket] = await connected;
+    const received = [];
+    socket.on('message', raw => received.push(JSON.parse(raw.toString())));
+    const entry = track(socket, received);
+    await until(() => received.some(msg => msg.type === 'hello') && previous.closed);
+    const hello = received.find(msg => msg.type === 'hello');
+    entry.processId = hello.processId;
+    assert.equal(hello.sessionId, id);
+    assert.notEqual(hello.processId, previous.processId);
+    // Nothing for the new session went out on the old connection.
+    assert.deepEqual(previous.received.slice(sentBefore).filter(msg => msg.processId !== previous.processId), []);
+    previous = entry;
+  }
+  for (const entry of bound) assert.deepEqual(entry.received.filter(msg => 'processId' in msg && msg.processId !== entry.processId), []);
+  assert.deepEqual(ctx.state.notices.filter(([, level]) => level === 'warning'), []);
+  assert.deepEqual(ctx.state.statuses.at(-1), ['rc', '/rc connected']);
+  // /rc stays opted in for the new session.
+  previous.socket.send(JSON.stringify({ type: 'prompt', sessionId: 's3', text: 'after replace' }));
+  await until(() => pi.prompts.at(-1)?.[0] === 'after replace');
+});
+
+test('omp aborted assistant followed by placeholder tool results still restores held prompts', async t => {
+  const { pi, ctx, events, until, send } = await attached(t, { omp: true });
+  ctx.state.idle = false;
+  ctx.state.editor = 'draft';
+  pi.emit('agent_start', ctx);
+  send({ type: 'prompt', text: 'held after tool abort' });
+  await until(() => events('queue_update').at(-1)?.queued.length === 1);
+  pi.emit('agent_end', ctx, { type: 'agent_end', messages: [
+    { role: 'user', content: 'go' },
+    { role: 'assistant', stopReason: 'aborted', content: [{ type: 'toolCall', id: 'a' }, { type: 'toolCall', id: 'b' }] },
+    { role: 'toolResult', toolCallId: 'a', isError: true, content: [{ type: 'text', text: 'aborted' }] },
+    { role: 'toolResult', toolCallId: 'b', isError: true, content: [{ type: 'text', text: 'aborted' }] },
+  ] });
+  await until(() => events('agent_settled').length === 1);
+  assert.equal(ctx.state.editor, 'held after tool abort\n\ndraft');
+  assert.equal(pi.prompts.length, 0);
+  assert.deepEqual(events('queue_update').at(-1).queued, []);
+});
+
+test('omp todo results publish the flattened plan; hello and branch changes keep it current', async t => {
+  const { pi, ctx, until, events, hellos, hello } = await attached(t, { omp: true });
+  assert.deepEqual((await hello()).todos, []);
+  const phases = [
+    { name: 'Setup', tasks: [{ content: 'Install deps', status: 'in_progress', notes: ['n'] }, { content: 'Wire CI', status: 'blocked', blocker: 'Needs token' }] },
+    { name: 'Ship', tasks: [{ content: 'Release', status: 'pending' }] },
+  ];
+  const expected = [
+    { id: '0.0', content: 'Install deps', status: 'in_progress', phase: 'Setup' },
+    { id: '0.1', content: 'Wire CI', status: 'blocked', phase: 'Setup', blocker: 'Needs token' },
+    { id: '1.0', content: 'Release', status: 'pending', phase: 'Ship' },
+  ];
+  const result = (details, extra = {}) => ({ type: 'tool_result', toolCallId: 'call', toolName: 'todo', input: {}, content: [], isError: false, details, ...extra });
+  pi.emit('tool_result', ctx, result({ op: 'init', phases, storage: 'session' }));
+  await until(() => events('todo_update').length === 1);
+  assert.deepEqual(events('todo_update')[0].todos, expected);
+  assert.deepEqual((await hello()).todos, expected);
+
+  // Other tools, failed calls and malformed details are not the plan; an unchanged plan is not re-sent.
+  pi.emit('tool_result', ctx, result({ op: 'init', phases: [] }, { toolName: 'bash' }));
+  pi.emit('tool_result', ctx, result({ op: 'done', phases: [] }, { isError: true }));
+  pi.emit('tool_result', ctx, result({ op: 'view', phases: [{ name: 'Bad', tasks: [{ content: 'x', status: 'wat' }] }] }));
+  pi.emit('tool_result', ctx, result(undefined));
+  pi.emit('tool_result', ctx, result({ op: 'view', phases, storage: 'session' }));
+  await delay(30);
+  assert.equal(events('todo_update').length, 1);
+
+  // The server drops items past its text caps, so long text is cut and blank tasks are skipped.
+  pi.emit('tool_result', ctx, result({ op: 'append', phases: [{ name: 'p'.repeat(300), tasks: [{ content: 'c'.repeat(2000), status: 'completed' }, { content: '  ', status: 'pending' }] }] }));
+  await until(() => events('todo_update').length === 2);
+  const [cut, ...rest] = events('todo_update')[1].todos;
+  assert.deepEqual([rest.length, cut.content.length, cut.phase.length, cut.status], [0, 1024, 256, 'completed']);
+
+  // A new session recovers the latest durable plan: the user's own edit wins over views and failed results.
+  const toolResult = (details, extra = {}) => ({ type: 'message', id: 'r', message: { role: 'toolResult', toolName: 'todo', details, ...extra } });
+  ctx.state.entries = [
+    toolResult({ op: 'init', phases }),
+    { type: 'custom', customType: 'user_todo_edit', data: { phases: [{ name: 'Edited', tasks: [{ content: 'By hand', status: 'completed' }] }] } },
+    toolResult({ op: 'done', phases }, { isError: true }),
+    toolResult({ op: 'view', phases }),
+  ];
+  const count = hellos().length;
+  pi.emit('session_start', ctx);
+  await until(() => hellos().length > count);
+  assert.deepEqual(hellos().at(-1).todos, [{ id: '0.0', content: 'By hand', status: 'completed', phase: 'Edited' }]);
+
+  // Navigating the tree, switching sessions, and changing branches all recompute the durable plan.
+  ctx.state.entries = [];
+  let updateCount = events('todo_update').length + 1;
+  pi.emit('session_tree', ctx);
+  await until(() => events('todo_update').length === updateCount);
+  assert.deepEqual(events('todo_update').at(-1).todos, []);
+  for (const type of ['session_switch', 'session_branch']) {
+    ctx.state.entries = [toolResult({ op: 'init', phases: [{ name: type, tasks: [{ content: `Plan ${type}`, status: 'pending' }] }] })];
+    updateCount = events('todo_update').length + 1;
+    const helloCount = hellos().length;
+    pi.emit(type, ctx, { type });
+    await until(() => events('todo_update').length === updateCount && hellos().length > helloCount);
+    const expected = [{ id: '0.0', content: `Plan ${type}`, status: 'pending', phase: type }];
+    assert.deepEqual(events('todo_update').at(-1).todos, expected);
+    assert.deepEqual(hellos().at(-1).todos, expected);
+  }
+});
+
+// Stand-in for omp's native ask: a dialog that stays open until it is answered or its signal aborts.
+function nativeDialog() {
+  const calls = [];
+  return { calls, invokeTool: (params, options) => new Promise((resolve, reject) => {
+    calls.push({ params, options, resolve });
+    options.signal.addEventListener('abort', () => reject(Object.assign(new Error('Ask input was cancelled'), { name: 'AbortError' })), { once: true });
+  }) };
+}
+const askParams = { questions: [
+  { id: 'storage', question: 'Database?', header: 'DB', options: [{ label: 'SQLite', description: ' embedded ', preview: 'not sent' }, { label: 'Postgres' }], recommended: 0 },
+  { id: 'features', question: 'Features?', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }], multi: true },
+] };
+const askPrompt = [
+  { id: 'storage', question: 'Database?', header: 'DB', options: [{ label: 'SQLite', description: 'embedded' }, { label: 'Postgres' }], recommended: 0 },
+  { id: 'features', question: 'Features?', options: [{ label: 'A' }, { label: 'B' }, { label: 'C' }], multi: true },
+];
+
+test('omp ask: browser answers resolve the native tool call and dismiss the local dialog', async t => {
+  const { pi, until, events, hello, send } = await attached(t, { omp: true });
+  const tool = pi.tools.get('ask');
+  assert.deepEqual([tool.name, tool.description, tool.parameters, tool.approval, tool.concurrency], ['ask', 'native ask', nativeParameters, 'read', 'exclusive']);
+  const native = nativeDialog();
+  const run = tool.execute('call-1', askParams, undefined, undefined, { invokeTool: native.invokeTool });
+  await until(() => events('ask_update').length === 1);
+  const { ask } = events('ask_update')[0];
+  assert.equal(typeof ask.requestId, 'string');
+  assert.deepEqual(ask.questions, askPrompt);
+  assert.deepEqual((await hello()).ask, ask);
+  assert.equal(native.calls.length, 1);
+  assert.equal(native.calls[0].params, askParams);
+
+  const good = [{ id: 'storage', selectedOptions: ['SQLite'] }, { id: 'features', selectedOptions: ['A', 'C'], customInput: 'D\r\nE' }];
+  const answer = (answers, requestId = ask.requestId, extra = {}) => send({ type: 'ask_answer', requestId, answers, ...extra });
+  answer(good, 'stale');
+  answer(good, ask.requestId, { sessionId: 'other' });
+  answer([]);
+  answer('everything');
+  answer([{ id: 'nope', selectedOptions: [] }]);
+  answer([{ id: 'storage', selectedOptions: ['MySQL'] }]);
+  answer([{ id: 'storage', selectedOptions: ['SQLite', 'Postgres'] }]);
+  answer([{ id: 'storage', selectedOptions: [] }]);
+  answer([{ id: 'storage', selectedOptions: ['SQLite'] }, { id: 'storage', selectedOptions: ['Postgres'] }]);
+  answer([{ id: 'features', selectedOptions: ['A', 'A'] }]);
+  answer([{ id: 'features', selectedOptions: ['A'], customInput: 7 }]);
+  assert.equal(await settledWithin(run, 50), 'pending');
+  assert.equal(native.calls[0].options.signal.aborted, false);
+  assert.equal(events('ask_update').length, 1);
+
+  answer(good);
+  assert.deepEqual(await run, {
+    content: [{ type: 'text', text: 'User answers:\nstorage: SQLite\nfeatures: [A, C] + "D\nE"' }],
+    details: { results: [
+      { id: 'storage', question: 'Database?', options: ['SQLite', 'Postgres'], multi: false, selectedOptions: ['SQLite'] },
+      { id: 'features', question: 'Features?', options: ['A', 'B', 'C'], multi: true, selectedOptions: ['A', 'C'], customInput: 'D\nE' }] },
+  });
+  assert.equal(native.calls[0].options.signal.aborted, true);
+  await until(() => events('ask_update').length === 2);
+  assert.equal(events('ask_update')[1].ask, null);
+  assert.equal((await hello()).ask, null);
+  answer(good);
+  await delay(30);
+  assert.equal(events('ask_update').length, 2);
+
+  const resolveAsk = async (params, answers) => {
+    const count = events('ask_update').length;
+    const dialog = nativeDialog();
+    const pending = tool.execute('call', params, undefined, undefined, { invokeTool: dialog.invokeTool });
+    await until(() => events('ask_update').length === count + 1);
+    send({ type: 'ask_answer', requestId: events('ask_update').at(-1).ask.requestId, answers });
+    const result = await pending;
+    await until(() => events('ask_update').length === count + 2);
+    return result;
+  };
+  const single = { questions: [askParams.questions[0]] };
+  assert.deepEqual(await resolveAsk(single, [{ id: 'storage', selectedOptions: ['Postgres'] }]), {
+    content: [{ type: 'text', text: 'User selected: Postgres' }],
+    details: { question: 'Database?', options: ['SQLite', 'Postgres'], multi: false, selectedOptions: ['Postgres'], customInput: undefined } });
+  const custom = await resolveAsk(single, [{ id: 'storage', selectedOptions: [], customInput: 'Mongo\nAtlas' }]);
+  assert.equal(custom.content[0].text, 'User provided custom input:\n  Mongo\n  Atlas');
+  assert.deepEqual(custom.details.selectedOptions, []);
+  assert.equal(custom.details.customInput, 'Mongo\nAtlas');
+  const none = await resolveAsk({ questions: [askParams.questions[1]] }, [{ id: 'features', selectedOptions: [] }]);
+  assert.equal(none.content[0].text, 'User did not select any options');
+});
+
+test('omp ask: a local answer or abort clears the browser prompt; session end cancels it; unanswerable asks stay local', async t => {
+  const { pi, ctx, until, events, hellos, send } = await attached(t, { omp: true });
+  const tool = pi.tools.get('ask');
+  const open = async (params = askParams, signal) => {
+    const count = events('ask_update').length;
+    const dialog = nativeDialog();
+    const run = tool.execute('call', params, signal, undefined, { invokeTool: dialog.invokeTool });
+    await until(() => events('ask_update').length === count + 1);
+    return { dialog, run, requestId: events('ask_update').at(-1).ask.requestId };
+  };
+  const cleared = count => until(() => events('ask_update').length === count && events('ask_update').at(-1).ask === null);
+
+  // The terminal user answers first: their result is returned untouched and a late browser answer does nothing.
+  const local = await open();
+  const localResult = { content: [{ type: 'text', text: 'User selected: SQLite' }], details: { question: 'Database?' } };
+  local.dialog.calls[0].resolve(localResult);
+  assert.equal(await local.run, localResult);
+  await cleared(2);
+  send({ type: 'ask_answer', requestId: local.requestId, answers: [{ id: 'storage', selectedOptions: ['SQLite'] }] });
+  await delay(30);
+  assert.equal(events('ask_update').length, 2);
+
+  // Aborting the tool call (Esc, Stop) rejects it and clears the prompt.
+  const outer = new AbortController();
+  const aborted = await open(askParams, outer.signal);
+  outer.abort();
+  await assert.rejects(aborted.run, { name: 'AbortError' });
+  await cleared(4);
+
+  // An ask the browser cannot answer exactly goes straight to the native tool with the caller's own signal.
+  const duplicate = { questions: [{ id: 'q', question: 'Pick?', options: [{ label: 'A' }, { label: 'A' }] }] };
+  const signal = new AbortController().signal;
+  const dialog = nativeDialog();
+  const run = tool.execute('call', duplicate, signal, undefined, { invokeTool: dialog.invokeTool });
+  assert.equal(dialog.calls[0].options.signal, signal);
+  dialog.calls[0].resolve(localResult);
+  assert.equal(await run, localResult);
+  await delay(30);
+  assert.equal(events('ask_update').length, 4);
+
+  // A replaced session dismisses the dialog; its hello reports no ask.
+  const replaced = await open();
+  const count = hellos().length;
+  pi.emit('session_start', ctx);
+  await assert.rejects(replaced.run, { name: 'AbortError' });
+  assert.equal(replaced.dialog.calls[0].options.signal.aborted, true);
+  await until(() => hellos().length > count);
+  assert.equal(hellos().at(-1).ask, null);
+
+  // Shutdown does the same and tells the browser before the socket closes.
+  const shutdown = await open();
+  pi.emit('session_shutdown', ctx);
+  await assert.rejects(shutdown.run, { name: 'AbortError' });
+  await cleared(7);
 });

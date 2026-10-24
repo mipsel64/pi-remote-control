@@ -48,6 +48,18 @@ const MAX_SUBSCRIPTIONS: usize = 100;
 const MAX_QUEUED: usize = 20;
 const MAX_BACKGROUND: usize = 20;
 const MAX_BACKGROUND_FULL: usize = 1024;
+const MAX_TODOS: usize = 200;
+const MAX_TEXT: usize = 1024;
+const MAX_ASK_QUESTIONS: usize = 20;
+const MAX_ASK_OPTIONS: usize = 50;
+const MAX_ASK_INPUT: usize = 16 * 1024;
+const TODO_STATUSES: [&str; 5] = [
+    "pending",
+    "in_progress",
+    "completed",
+    "abandoned",
+    "blocked",
+];
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 type Sender = mpsc::UnboundedSender<Message>;
 
@@ -362,6 +374,131 @@ fn background_list(v: &Value) -> Vec<Value> {
             .collect()
     })
 }
+fn text_str(v: &Value, max: usize) -> Option<&str> {
+    v.as_str()
+        .filter(|s| !s.is_empty() && s.encode_utf16().count() <= max)
+}
+fn unique_by(items: &[Value], key: &str) -> bool {
+    items
+        .iter()
+        .enumerate()
+        .all(|(i, item)| items[..i].iter().all(|earlier| earlier[key] != item[key]))
+}
+// The agent's plan; invalid items are dropped individually.
+fn todo_list(v: &Value) -> Vec<Value> {
+    v.as_array().map_or_else(Vec::new, |items| {
+        items
+            .iter()
+            .take(MAX_TODOS)
+            .filter_map(|item| {
+                let status = item["status"]
+                    .as_str()
+                    .filter(|status| TODO_STATUSES.contains(status))?;
+                let mut todo = json!({
+                    "id": valid_id(&item["id"])?,
+                    "content": text_str(&item["content"], MAX_TEXT)?,
+                    "status": status,
+                });
+                if let Some(phase) = text_str(&item["phase"], 256) {
+                    todo["phase"] = phase.into();
+                }
+                if let Some(blocker) = text_str(&item["blocker"], MAX_TEXT) {
+                    todo["blocker"] = blocker.into();
+                }
+                Some(todo)
+            })
+            .collect()
+    })
+}
+fn ask_question(v: &Value) -> Option<Value> {
+    let options = v["options"]
+        .as_array()
+        .filter(|options| options.len() <= MAX_ASK_OPTIONS)?
+        .iter()
+        .map(|option| {
+            let mut out = json!({"label": valid_id(&option["label"])?});
+            if let Some(description) = text_str(&option["description"], MAX_TEXT) {
+                out["description"] = description.into();
+            }
+            Some(out)
+        })
+        .collect::<Option<Vec<_>>>()
+        .filter(|options| unique_by(options, "label"))?;
+    let multi = v["multi"] == true;
+    let mut question = json!({
+        "id": valid_id(&v["id"])?,
+        "question": text_str(&v["question"], MAX_TEXT)?,
+        "multi": multi,
+    });
+    if let Some(header) = text_str(&v["header"], 256) {
+        question["header"] = header.into();
+    }
+    if let Some(recommended) = v["recommended"]
+        .as_u64()
+        .filter(|index| *index < options.len() as u64)
+    {
+        question["recommended"] = recommended.into();
+    }
+    question["options"] = options.into();
+    Some(question)
+}
+// A browser can answer only what arrives intact, so one invalid question or option drops the whole ask.
+fn ask_value(v: &Value) -> Option<Value> {
+    let questions = v["questions"]
+        .as_array()
+        .filter(|questions| !questions.is_empty() && questions.len() <= MAX_ASK_QUESTIONS)?
+        .iter()
+        .map(ask_question)
+        .collect::<Option<Vec<_>>>()
+        .filter(|questions| unique_by(questions, "id"))?;
+    Some(json!({"requestId": valid_id(&v["requestId"])?, "questions": questions}))
+}
+// Rebuilds a browser's answers from known fields; None unless they fit the pending ask exactly.
+fn ask_answer(ask: Option<&Value>, session: &str, v: &Value) -> Option<Value> {
+    let ask = ask.filter(|ask| ask["requestId"] == v["requestId"])?;
+    let questions = ask["questions"].as_array()?;
+    let given = v["answers"]
+        .as_array()
+        .filter(|given| !given.is_empty() && given.len() <= questions.len())?;
+    let mut answers: Vec<Value> = Vec::with_capacity(given.len());
+    for answer in given {
+        let id = valid_id(&answer["id"])?;
+        if answers.iter().any(|done| done["id"] == id) {
+            return None;
+        }
+        let question = questions.iter().find(|question| question["id"] == id)?;
+        let options = question["options"].as_array()?;
+        let limit = if question["multi"] == true {
+            options.len()
+        } else {
+            1
+        };
+        let selected = answer["selectedOptions"]
+            .as_array()
+            .filter(|selected| selected.len() <= limit)?;
+        let valid = selected.iter().enumerate().all(|(i, option)| {
+            options.iter().any(|known| known["label"] == *option) && !selected[..i].contains(option)
+        });
+        if !valid {
+            return None;
+        }
+        let custom = match &answer["customInput"] {
+            Value::Null => None,
+            Value::String(text) if text.len() <= MAX_ASK_INPUT => {
+                Some(text).filter(|text| !text.is_empty())
+            }
+            _ => return None,
+        };
+        let mut out = json!({"id": id, "selectedOptions": selected});
+        if let Some(text) = custom {
+            out["customInput"] = text.as_str().into();
+        }
+        answers.push(out);
+    }
+    Some(
+        json!({"type":"ask_answer","sessionId":session,"requestId":ask["requestId"],"answers":answers}),
+    )
+}
 fn thinking_level(v: &Value) -> Option<&str> {
     v.as_str().filter(|s| THINKING_LEVELS.contains(s))
 }
@@ -468,14 +605,17 @@ struct Session {
     context: Option<Value>,
     queued: Vec<String>,
     background: Vec<Value>,
+    todos: Vec<Value>,
+    ask: Option<Value>,
     models: Vec<Value>,
     owner: Option<Uuid>,
     tx: Option<Sender>,
     pending: Option<PendingSnapshot>,
 }
 impl Session {
+    // A session with no agent has nobody to answer for, so it never exposes its ask.
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"host":self.host,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"host":self.host,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking || self.ask.is_some()) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background,"todos":self.todos,"ask":self.tx.as_ref().and(self.ask.as_ref())})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -749,6 +889,8 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 context: meta.context,
                 queued: Vec::new(),
                 background: Vec::new(),
+                todos: Vec::new(),
+                ask: None,
                 models: Vec::new(),
                 owner: None,
                 tx: None,
@@ -1191,6 +1333,7 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
                     s.pending = None;
                     s.queued.clear();
                     s.background.clear();
+                    s.ask = None;
                     publish(&inner);
                 }
             }
@@ -1318,6 +1461,8 @@ fn agent_message(
             context: context_value(&v["context"]),
             queued: queued_list(&v["queued"]),
             background: background_list(&v["background"]),
+            todos: todo_list(&v["todos"]),
+            ask: ask_value(&v["ask"]),
             models: model_list(&v["models"]).unwrap_or_default(),
             owner: Some(id),
             tx: Some(tx.clone()),
@@ -1406,6 +1551,9 @@ fn agent_message(
                     "ui_prompt_end",
                     "queue_update",
                     "background_update",
+                    "agent_end",
+                    "todo_update",
+                    "ask_update",
                 ]
                 .contains(&v["event"]["type"].as_str().unwrap_or("")) =>
         {
@@ -1424,9 +1572,27 @@ fn agent_message(
                 session.background = background_list(&v["event"]["background"]);
                 changed = true;
             }
-            if kind == "agent_start" || kind == "agent_settled" {
-                session.busy = kind == "agent_start";
-                session.busy_since = session.busy.then(now_ms);
+            if kind == "todo_update" {
+                session.todos = todo_list(&v["event"]["todos"]);
+                changed = true;
+            }
+            let introduced_ask = if kind == "ask_update" {
+                let ask = ask_value(&v["event"]["ask"]);
+                let introduced = session.ask.is_none() && ask.is_some();
+                session.ask = ask;
+                changed = true;
+                introduced
+            } else {
+                false
+            };
+            let run_ended = kind == "agent_settled"
+                || (kind == "agent_end"
+                    && v["event"]["willContinue"] != true
+                    && v["event"]["awaitingAsyncWork"] != true);
+            if kind == "agent_start" || run_ended {
+                let started = kind == "agent_start";
+                session.busy = started;
+                session.busy_since = started.then(now_ms);
                 session.asking = v["event"]["asking"] == true;
                 if kind == "agent_start" {
                     session.updated_at = session.updated_at.max(now_ms());
@@ -1457,8 +1623,26 @@ fn agent_message(
             if changed {
                 publish(&inner);
             }
-            // Browsers read these lists from the sanitized sessions frame, never from the agent's raw event.
-            if kind != "queue_update" && kind != "background_update" {
+            // Agent end carries omp's full messages; browsers need only its safe lifecycle fields.
+            if kind == "agent_end" {
+                let mut event = json!({"type":"agent_end"});
+                for key in ["summary", "willContinue", "awaitingAsyncWork", "asking"] {
+                    if let Some(value) = v["event"].get(key).filter(|value| !value.is_null()) {
+                        event[key] = value.clone();
+                    }
+                }
+                broadcast(
+                    &inner,
+                    json!({"type":"event","processId":p,"sessionId":s,"event":event}),
+                );
+            } else if kind == "ask_update" {
+                if introduced_ask {
+                    broadcast(
+                        &inner,
+                        json!({"type":"event","processId":p,"sessionId":s,"event":{"type":"ask_update","ask":inner.sessions[p.as_str()].ask.as_ref().unwrap()}}),
+                    );
+                }
+            } else if !["queue_update", "background_update", "todo_update"].contains(&kind) {
                 broadcast(
                     &inner,
                     json!({"type":"event","processId":p,"sessionId":s,"event":v["event"]}),
@@ -1467,7 +1651,7 @@ fn agent_message(
             if kind == "message_end" {
                 send(tx, json!({"type":"history","sessionId":s}));
             }
-            if let Some(body) = notice_body(&v["event"]) {
+            if let Some(body) = notice_body(&v["event"], introduced_ask) {
                 if let Some(push) = &app.settings.push {
                     let payload = push_payload(&inner.sessions[p.as_str()].name, p, &s, &body);
                     for subscription in inner.subscriptions.iter().cloned() {
@@ -1571,6 +1755,7 @@ fn browser_message(app: &App, tx: &Sender, v: &Value) {
         {
             Some(json!({"type":"rename","sessionId":s,"name":v["name"]}))
         }
+        Some("ask_answer") => ask_answer(session.ask.as_ref(), s, v),
         _ => None,
     };
     match command {
@@ -1581,9 +1766,9 @@ fn browser_message(app: &App, tx: &Sender, v: &Value) {
         ),
     }
 }
-fn notice_body(event: &Value) -> Option<String> {
-    let text = |key: &str, max: usize| {
-        event[key]
+fn notice_body(event: &Value, introduced_ask: bool) -> Option<String> {
+    let text = |value: &Value, max: usize| {
+        value
             .as_str()
             .map(str::trim)
             .filter(|t| !t.is_empty())
@@ -1591,12 +1776,21 @@ fn notice_body(event: &Value) -> Option<String> {
     };
     match event["type"].as_str()? {
         "agent_settled" => {
-            Some(text("summary", 200).unwrap_or_else(|| "Finished responding".into()))
+            Some(text(&event["summary"], 200).unwrap_or_else(|| "Finished responding".into()))
         }
-        "ui_prompt_start" => Some(text("title", 120).map_or_else(
+        "agent_end" if event["willContinue"] != true && event["awaitingAsyncWork"] != true => {
+            Some(text(&event["summary"], 200).unwrap_or_else(|| "Finished responding".into()))
+        }
+        "ui_prompt_start" => Some(text(&event["title"], 120).map_or_else(
             || "Needs your input".into(),
             |title| format!("Needs your input: {title}"),
         )),
+        "ask_update" if introduced_ask => Some(
+            text(&event["ask"]["questions"][0]["question"], 120).map_or_else(
+                || "Needs your input".into(),
+                |question| format!("Needs your input: {question}"),
+            ),
+        ),
         _ => None,
     }
 }

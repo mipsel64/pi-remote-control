@@ -45,6 +45,12 @@ test('in-page notice only for a settled prompt the user is not looking at', () =
   assert.equal(sessionNotice(prompt(), view).body, 'Needs your input');
   assert.equal(sessionNotice({ ...settled(), event: { type: 'ui_prompt_end' } }, view), null);
   assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_settled', asking: true, summary: 'Ship it?' } }, view).body, 'Ship it?');
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_end' } }, view).body, 'Finished responding');
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_end', willContinue: true } }, view), null);
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'agent_end', awaitingAsyncWork: true } }, view), null);
+  const ask = { requestId: 'r1', questions: [{ id: 'q1', question: 'Choose a runtime' }] };
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'ask_update', ask } }, view).body, 'Needs your input: Choose a runtime');
+  assert.equal(sessionNotice({ ...settled(), event: { type: 'ask_update', ask: null } }, view), null);
   assert.equal(sessionNotice({ type: 'sessions', sessions }, view), null);
   const long = [{ ...session(), name: 'x'.repeat(90) }];
   assert.equal(sessionNotice(settled(), { ...view, sessions: long }).title, 'x'.repeat(80));
