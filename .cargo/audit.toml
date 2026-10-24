@@ -1,3 +1,4 @@
 [advisories]
 # rsa is only reachable through web-push -> jwt-simple (pure-rust) -> superboring; VAPID signs with ES256, so prc never performs RSA operations.
-ignore = ["RUSTSEC-2023-0071"]
+# crypto-bigint 0.5 comes from web-push -> jwt-simple 0.12 -> p256 0.13; no fixed 0.5.x exists and web-push 0.11.0 pins jwt-simple 0.12. VAPID signing is server-side only, so timing is not attacker-observable.
+ignore = ["RUSTSEC-2023-0071", "RUSTSEC-2026-0387"]
