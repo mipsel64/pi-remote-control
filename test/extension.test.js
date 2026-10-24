@@ -27,9 +27,9 @@ function mockPi(omp = false) {
   let name;
   return {
     handlers, commands, prompts, modelsSet, levels, renames, tools, setModelResult: true,
-    // omp injects schema builders and lists its native tools; Pi has neither.
+    // omp injects schema builders, lists its native tools and has an event bus; Pi has none of these.
     ...(omp && { arktype: {}, registerTool: tool => tools.set(tool.name, tool),
-      getAllTools: () => [nativeAsk] }),
+      getAllTools: () => [nativeAsk], events: bus() }),
     on(type, fn) { handlers.set(type, [...(handlers.get(type) ?? []), fn]); },
     registerCommand(name, command) { commands.set(name, command); },
     command(name, args, ctx) { return commands.get(name).handler(args, ctx); },
@@ -63,6 +63,8 @@ function context(id = 's1') {
     get signal() { return state.signal; },
     hasPendingMessages: () => state.pending ?? false,
     abort: () => { state.aborted++; },
+    // omp's Main-owned async jobs.
+    getAsyncJobSnapshot: () => ({ running: state.jobs ?? [], recent: [], delivery: { queued: 0, delivering: false, pendingJobIds: [] } }),
   };
 }
 
@@ -825,13 +827,14 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const settledWithin = (promise, ms) => Promise.race([promise.then(() => 'settled', () => 'settled'), delay(ms).then(() => 'pending')]);
 
 // A connected extension runtime. omp stands in for a host that emits agent_end (never agent_settled) and can re-register native tools.
-async function attached(t, { omp = false, beforeAttach } = {}) {
+async function attached(t, { omp = false, piEvents = false, beforeAttach } = {}) {
   const wss = new WebSocketServer({ port: 0 });
   await once(wss, 'listening');
   const previous = [process.env.PI_RC_URL, process.env.PI_RC_AGENT_TOKEN];
   process.env.PI_RC_URL = `ws://127.0.0.1:${wss.address().port}/agent`;
   process.env.PI_RC_AGENT_TOKEN = 'secret';
   const pi = mockPi(omp);
+  if (piEvents) pi.events = bus();
   const ctx = context();
   t.after(() => new Promise(resolve => {
     pi.emit('session_shutdown', ctx);
@@ -1301,4 +1304,123 @@ test('omp ask: a local answer or abort clears the browser prompt; session end ca
   pi.emit('session_shutdown', ctx);
   await assert.rejects(shutdown.run, { name: 'AbortError' });
   await cleared(7);
+});
+
+// Frames as omp v18 emits them (task/executor.ts): lifecycle carries no timestamp or assignment; progress nests live state.
+const lifecycle = (status, extra = {}) => ({ id: 'Probe', agent: 'task', agentSource: 'bundled', parentToolCallId: 'call-1', detached: true, status, sessionFile: '/tmp/Probe.jsonl', index: 0, ...extra });
+const progress = (state, extra = {}) => ({ index: 0, agent: 'task', agentSource: 'bundled', task: 'Complete assignment thoroughly:\n\nReview the diff\nCarefully',
+  assignment: 'Review the diff\nCarefully', parentToolCallId: 'call-1', detached: true, sessionFile: '/tmp/Probe.jsonl',
+  progress: { index: 0, id: 'Probe', agent: 'task', status: 'running', toolCount: 0, durationMs: 5, ...state }, ...extra });
+
+test('omp depth-1 subagents appear from lifecycle and progress frames and leave when they end', async t => {
+  const { pi, until, events, hello } = await attached(t, { omp: true });
+  const updates = () => events('background_update').map(event => event.background);
+  const before = Date.now();
+  pi.events.emit('task:subagent:lifecycle', lifecycle('started'));
+  await until(() => updates().length === 1);
+  const [started] = updates()[0];
+  assert.ok(started.startedAt >= before && started.startedAt <= Date.now());
+  assert.deepEqual(started, { kind: 'agent', id: 'Probe', label: 'Probe', detail: '', startedAt: started.startedAt });
+
+  // The best current activity is the detail; the assignment is the expanded form. A non-generic agent type joins the label.
+  pi.events.emit('task:subagent:progress', progress({ lastIntent: 'Reading files', currentToolIntent: 'Grepping for TODO' }, { agent: 'reviewer' }));
+  await until(() => updates().length === 2);
+  const reviewing = { kind: 'agent', id: 'Probe', label: 'Probe · reviewer', detail: 'Grepping for TODO', full: 'Review the diff Carefully', startedAt: started.startedAt };
+  assert.deepEqual(updates()[1], [reviewing]);
+  assert.deepEqual((await hello()).background, [reviewing]);
+  pi.events.emit('task:subagent:progress', progress({ lastIntent: 'Reading files' }));
+  await until(() => updates().length === 3);
+  assert.deepEqual(updates()[2], [{ ...reviewing, label: 'Probe', detail: 'Reading files' }]);
+  pi.events.emit('task:subagent:progress', progress({}));
+  await until(() => updates().length === 4);
+  assert.deepEqual(updates()[3], [{ ...reviewing, label: 'Probe', detail: 'Review the diff' }]);
+
+  pi.events.emit('task:subagent:lifecycle', lifecycle('completed'));
+  await until(() => updates().length === 5);
+  assert.deepEqual(updates()[4], []);
+  // A late coalesced progress frame does not bring an ended subagent back.
+  pi.events.emit('task:subagent:progress', progress({ lastIntent: 'late' }));
+  await delay(30);
+  assert.equal(updates().length, 5);
+  assert.deepEqual((await hello()).background, []);
+});
+
+test('omp async task jobs and their subagent frames show once, keyed by id', async t => {
+  const { pi, ctx, until, events } = await attached(t, { omp: true });
+  const updates = () => events('background_update').map(event => event.background);
+  ctx.state.jobs = [
+    { id: 'Probe', type: 'task', status: 'running', label: 'Probe', startTime: 1000, agentId: 'Probe', ownerId: 'Main' },
+    { id: 'bg_2', type: 'eval', status: 'running', label: 'python', startTime: 1100, ownerId: 'Main' },
+  ];
+  pi.emit('tool_execution_end', ctx, { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'task' });
+  await until(() => updates().length === 1);
+  assert.deepEqual(updates()[0], [{ kind: 'agent', id: 'Probe', label: 'Probe', detail: '', startedAt: 1000 }]);
+
+  // The job's start time wins over receipt time.
+  pi.events.emit('task:subagent:lifecycle', lifecycle('started'));
+  pi.events.emit('task:subagent:progress', progress({ currentToolIntent: 'Grepping' }));
+  await until(() => updates().length === 2);
+  assert.deepEqual(updates().at(-1), [{ kind: 'agent', id: 'Probe', label: 'Probe', detail: 'Grepping', full: 'Review the diff Carefully', startedAt: 1000 }]);
+
+  // The job outlives the subagent until it settles.
+  pi.events.emit('task:subagent:lifecycle', lifecycle('completed'));
+  await until(() => updates().length === 3);
+  assert.deepEqual(updates()[2], [{ kind: 'agent', id: 'Probe', label: 'Probe', detail: '', startedAt: 1000 }]);
+  ctx.state.jobs = [];
+  pi.emit('tool_execution_update', ctx, { type: 'tool_execution_update', toolCallId: 'call-1', toolName: 'task' });
+  await until(() => updates().length === 4);
+  assert.deepEqual(updates()[3], []);
+});
+
+test('omp task jobs whose id differs from the subagent id still show once', async t => {
+  const { pi, ctx, until, events } = await attached(t, { omp: true });
+  const updates = () => events('background_update').map(event => event.background);
+  ctx.state.jobs = [{ id: 'Probe-2', type: 'task', status: 'running', label: 'Probe-2', startTime: 3000, agentId: 'Probe', ownerId: 'Main' }];
+  pi.events.emit('task:subagent:lifecycle', lifecycle('started'));
+  pi.events.emit('task:subagent:progress', progress({ currentToolIntent: 'Grepping' }));
+  await until(() => updates().at(-1)?.[0]?.detail === 'Grepping');
+  assert.deepEqual(updates().at(-1), [{ kind: 'agent', id: 'Probe', label: 'Probe', detail: 'Grepping', full: 'Review the diff Carefully', startedAt: 3000 }]);
+});
+
+test('omp async bash jobs show as shells until a refresh tick finds them gone', async t => {
+  const { pi, ctx, until, events, hello } = await attached(t, { omp: true });
+  const updates = () => events('background_update').map(event => event.background);
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  t.after(() => t.mock.timers.reset());
+  ctx.state.jobs = [{ id: 'bg_1', type: 'bash', status: 'running', label: 'sleep 5', command: 'sleep 5', startTime: 2000, ownerId: 'Main' }];
+  pi.emit('tool_execution_end', ctx, { type: 'tool_execution_end', toolCallId: 'call-1', toolName: 'bash' });
+  await until(() => updates().length === 1);
+  const sleeping = { kind: 'shell', id: 'bg_1', label: 'sleep 5', detail: 'sleep 5', startedAt: 2000 };
+  assert.deepEqual(updates()[0], [sleeping]);
+  assert.deepEqual((await hello()).background, [sleeping]);
+
+  // Jobs settle silently, so only the slow refresh notices.
+  ctx.state.jobs = [];
+  t.mock.timers.tick(1999);
+  await delay(20);
+  assert.equal(updates().length, 1);
+  t.mock.timers.tick(1);
+  await until(() => updates().length === 2);
+  assert.deepEqual(updates()[1], []);
+  // Nothing left running stops the refresh.
+  ctx.state.jobs = [{ id: 'bg_9', type: 'bash', status: 'running', label: 'sleep 9', command: 'sleep 9', startTime: 3000, ownerId: 'Main' }];
+  t.mock.timers.tick(10000);
+  await delay(20);
+  assert.equal(updates().length, 2);
+});
+
+test('Pi ignores omp background channels, and omp subagent sessions never publish them', async t => {
+  const jobs = [{ id: 'bg_1', type: 'bash', status: 'running', label: 'sleep 5', command: 'sleep 5', startTime: 2000, ownerId: 'Main' }];
+  for (const options of [{ piEvents: true }, { omp: true, beforeAttach: (_pi, ctx) => { ctx.agent = { kind: 'sub' }; } }]) {
+    const { pi, ctx, events, hello, hellos } = await attached(t, options);
+    ctx.state.jobs = jobs;
+    assert.deepEqual(hellos()[0].background, []);
+    pi.events.emit('task:subagent:lifecycle', lifecycle('started'));
+    pi.events.emit('task:subagent:progress', progress({ currentToolIntent: 'Grepping' }));
+    for (const type of ['tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'agent_start'])
+      pi.emit(type, ctx, { type, toolCallId: 'call-1', toolName: 'bash' });
+    await delay(30);
+    assert.deepEqual(events('background_update'), []);
+    assert.deepEqual((await hello()).background, []);
+  }
 });

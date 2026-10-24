@@ -114,6 +114,13 @@ test('toolSummary picks the first useful argument and summarizes task tools', ()
   assert.equal(toolSummary('x', { other: 1 }), '');
   assert.equal(toolSummary('x', null), '');
   assert.equal(toolSummary('bash', { command: 'y'.repeat(200) }).length, 120);
+  // omp: intent `i` only when nothing better; task tool summarizes its task names, else their count.
+  assert.equal(toolSummary('wait', { i: 'Waiting for probe worker\nmore' }), 'Waiting for probe worker');
+  assert.equal(toolSummary('read', { path: 'src/a.js', i: 'Reading file' }), 'src/a.js');
+  assert.equal(toolSummary('task', { context: 'c', tasks: [{ name: 'Probe', task: 't' }, { name: 'Scout', task: 'u' }], i: 'Spawning' }), 'Probe, Scout');
+  assert.equal(toolSummary('task', { tasks: [{ task: 't' }, { name: 'Named', task: 'u' }] }), '2 tasks');
+  assert.equal(toolSummary('task', { tasks: [{ task: 't' }] }), '1 task');
+  assert.equal(toolSummary('task', { tasks: [], i: 'Spawning' }), 'Spawning');
   assert.equal(toolStatus(undefined, true), 'pending');
   assert.equal(toolStatus(undefined, false), 'incomplete');
   assert.equal(toolStatus({ isError: false }, true), 'done');

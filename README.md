@@ -61,7 +61,7 @@ To tell several servers apart on the Home Screen, pick an **App icon** colour in
 
 Pi shows a one-time "Remote control connected" notice when `/rc` connects, and the footer shows `/rc connected` in green, or a warning while it retries (automatic reconnects are silent). Attach again after `/new` to add the new session to the list.
 
-For omp, the **Tasks** panel above the composer shows the current todo plan by phase, including task status and blockers. omp ask dialogs can be answered in the terminal or browser with single-choice, multi-choice, and custom answers; the local dialog stays active and the first answer wins. A final omp run clears **Thinking** and uses the same opt-in completion notifications as Pi.
+For omp, the **Tasks** panel above the composer shows the current todo plan by phase, including task status and blockers. The background panel lists running subagents the main agent launched (not their own subagents) and its async bash jobs. omp ask dialogs can be answered in the terminal or browser with single-choice, multi-choice, and custom answers; the local dialog stays active and the first answer wins. A final omp run clears **Thinking** and uses the same opt-in completion notifications as Pi.
 
 Web-submitted steering during a run appears under **queued** until Pi consumes it; prompts held during compaction/retry gaps are shown there too. Idle Send goes straight into the conversation without a pending row. This is a display, not a second delivery queue. Stop clears the display; Pi keeps ownership of native queue/editor restoration. Browser and agent reconnects retain pending previews in the same extension runtime.
 

@@ -63,7 +63,13 @@ export function toolSummary(name, args) {
     const summary = [subject, typeof args.status === 'string' ? args.status : ''].filter(Boolean).join(' · ');
     if (summary) return firstLine(summary);
   }
-  const value = ['command', 'path', 'file_path', 'subject', 'query', 'url', 'pattern'].map(key => args[key]).find(item => typeof item === 'string' && item.trim());
+  // omp's task tool launches `tasks: [{ name?, task }]`.
+  if (Array.isArray(args.tasks) && args.tasks.length) {
+    const names = args.tasks.map(task => typeof task?.name === 'string' ? task.name.trim() : '');
+    return firstLine(names.every(Boolean) ? names.join(', ') : `${names.length} ${names.length === 1 ? 'task' : 'tasks'}`);
+  }
+  // omp tools carry their intent in `i`, e.g. wait's "Waiting for probe worker".
+  const value = ['command', 'path', 'file_path', 'subject', 'query', 'url', 'pattern', 'i'].map(key => args[key]).find(item => typeof item === 'string' && item.trim());
   return value ? firstLine(value) : '';
 }
 
