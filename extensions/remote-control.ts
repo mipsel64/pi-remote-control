@@ -145,6 +145,27 @@ function describe(text: string) {
 const MAX_BACKGROUND = 20;
 const LIVE_PROCESS_STATUSES = ['running', 'terminating', 'terminate_timeout'];
 const startTime = (value: unknown) => Number.isSafeInteger(value) && (value as number) > 0 ? value as number : null;
+// omp has no job change events: jobs settle and are evicted silently, so running items are re-pulled this often.
+const OMP_POLL_MS = 2000;
+const OMP_ENDED = ['completed', 'failed', 'aborted'];
+const trimmed = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+
+// One omp `task:subagent:lifecycle` or `task:subagent:progress` frame for subagent `id`; progress frames nest the live state under `progress`.
+function ompSubagentItem(id: string, frame: Fields, startedAt: number | null): Background {
+  const progress = record(frame.progress) ?? frame;
+  const type = trimmed(frame.agent) || trimmed(progress.agent);
+  const assignment = trimmed(frame.assignment) || trimmed(progress.assignment);
+  const activity = [progress.currentToolIntent, progress.lastIntent, progress.description, frame.description].map(trimmed).find(Boolean)
+    || assignment.split('\n').map(line => line.trim()).find(Boolean) || '';
+  const detail = preview(activity);
+  const full = preview(assignment, 1000);
+  return { kind: 'agent', id, label: preview(type && type !== 'task' ? `${id} · ${type}` : id, 80), detail, ...(full && full !== detail ? { full } : {}), startedAt };
+}
+// omp sets ctx.agent.kind ('main' or 'sub'); Pi has no such field and only runs main sessions.
+function isMainSession(current: ExtensionContext) {
+  const kind = (current as unknown as { agent?: { kind?: unknown } }).agent?.kind;
+  return kind === undefined || kind === 'main';
+}
 
 // pi-processes `processes:request:list` rows; its protocol is internal to that package, so validate every field.
 function shellItems(list: unknown): Background[] {
@@ -350,7 +371,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   let stopped = false;
   let runSignal: AbortSignal | undefined;
   const previews = () => [...pending.map(item => item.text), ...queued].map(text => preview(text));
-  // Filled from other extensions' pi.events protocols; a list stays empty when its extension is not loaded.
+  // Filled from Pi extensions' pi.events protocols (a list stays empty when its extension is not loaded), or from omp's own subagents and jobs.
   let shells: Background[] = [];
   let agents: Background[] = [];
   let sentBackground = '[]';
@@ -358,6 +379,12 @@ export default function remoteControl(pi: ExtensionAPI) {
   let agentsStale = false;
   // omp uses final agent_end as settlement and injects schema builders into its extension API.
   const omp = 'arktype' in pi;
+  // omp re-runs this factory in every subagent session; only the main session tracks and publishes background work.
+  let mainSession = false;
+  // Live depth-1 omp subagents by id (an async task job shares it); ended ids drop late progress frames until revived.
+  const ompSubagents = new Map<string, Background>();
+  const ompEnded = new Set<string>();
+  let ompTimer: ReturnType<typeof setInterval> | undefined;
   // The agent's plan, flattened from omp todo results; sent in hello and whenever it changes.
   let todos: Todo[] = [];
   let sentTodos = '[]';
@@ -411,6 +438,47 @@ export default function remoteControl(pi: ExtensionAPI) {
     const timer = setTimeout(done, 5000);
     timer.unref?.();
     pi.events.emit('subagents:rpc:v1:request', { version: 1, requestId, method: 'status' });
+  }
+  function stopOmpTimer() {
+    clearInterval(ompTimer);
+    ompTimer = undefined;
+  }
+  function clearOmp() {
+    stopOmpTimer();
+    ompSubagents.clear();
+    ompEnded.clear();
+  }
+  // Main-owned running jobs: bash jobs are shells; task jobs merge with the subagent frames by id; eval jobs are not shown.
+  function collectOmp(current: ExtensionContext) {
+    let snapshot: Fields | undefined;
+    try { snapshot = record((current as unknown as { getAsyncJobSnapshot?: () => unknown }).getAsyncJobSnapshot?.()); }
+    catch { /* The runtime was replaced (/reload, /new) before this pull. */ }
+    const jobs = Array.isArray(snapshot?.running) ? snapshot.running.map(record) : [];
+    const taskJobs = new Map<string, Fields>();
+    shells = [];
+    for (const job of jobs) {
+      const id = trimmed(job?.id);
+      if (!job || !id) continue;
+      // omp suffixes a revived subagent's job id (`Probe-2`) and vibe turns (`Probe-t3`); agentId is the subagent's own id.
+      if (job.type === 'task') taskJobs.set(trimmed(job.agentId) || id, job);
+      if (job.type !== 'bash') continue;
+      const command = trimmed(job.command);
+      const label = trimmed(job.label) || command;
+      if (label) shells.push({ kind: 'shell', id, label: preview(label, 80), ...describe(command || label), startedAt: startTime(job.startTime) });
+    }
+    agents = [...ompSubagents.values()].map(item => ({ ...item, startedAt: startTime(taskJobs.get(item.id)?.startTime) ?? item.startedAt }));
+    for (const [id, job] of taskJobs)
+      if (!ompSubagents.has(id)) agents.push({ kind: 'agent', id, label: preview(trimmed(job.label) || id, 80), detail: '', startedAt: startTime(job.startTime) });
+    if (!shells.length && !agents.length) stopOmpTimer();
+    else if (!ompTimer) {
+      ompTimer = setInterval(refreshOmp, OMP_POLL_MS);
+      ompTimer.unref?.();
+    }
+  }
+  function refreshOmp() {
+    if (!ctx || !mainSession) return stopOmpTimer();
+    collectOmp(ctx);
+    publishBackground();
   }
   function publishQueue(current: ExtensionContext) {
     send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'queue_update', queued: previews() } });
@@ -566,6 +634,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     if (retry) clearTimeout(retry);
     retry = undefined;
     dropSocket();
+    stopOmpTimer();
   }
 
   // Closes the current socket without the close handler's retry or warning.
@@ -627,6 +696,7 @@ export default function remoteControl(pi: ExtensionAPI) {
           return;
         }
         ctx = current;
+        mainSession = isMainSession(current);
         registerAsk();
         status(current, connectionState() === 'retrying' ? 'retrying' : 'connecting');
         if (socket?.readyState === WebSocket.OPEN) {
@@ -666,8 +736,10 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   function hello(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
-    refreshShells();
-    refreshAgents();
+    if (!omp) {
+      refreshShells();
+      refreshAgents();
+    } else if (mainSession) collectOmp(current);
     sendHello(current, pending);
     snapshot(current);
   }
@@ -752,6 +824,8 @@ export default function remoteControl(pi: ExtensionAPI) {
 
   function sessionReplaced(current: ExtensionContext) {
     stopIdleWatch();
+    mainSession = isMainSession(current);
+    clearOmp();
     // The server binds each connection to the processId of its first hello, so a different session needs a fresh connection.
     // Drop it before anything below publishes for the new session on the old socket.
     if (socket && socketProcessId !== undefined && socketProcessId !== entryId(current)) dropSocket();
@@ -909,13 +983,44 @@ export default function remoteControl(pi: ExtensionAPI) {
     cancelAsk(current);
     clearPending(current);
     stop();
+    clearOmp();
   });
-  // Optional chaining: hosts without pi.events (older Pi, omp) just never show background work.
-  pi.events?.on('processes:changed', () => {
-    if (!ctx) return;
-    refreshShells();
-    publishBackground();
-  });
-  for (const channel of ['subagents:rpc:v1:ready', 'subagent:async-started', 'subagent:async-complete', 'subagent:child-status', 'subagent:foreground-complete'])
-    pi.events?.on(channel, () => { if (ctx) refreshAgents(); });
+  if (omp) {
+    const on = pi.on as (event: string, handler: (event: unknown, current: ExtensionContext) => void) => void;
+    for (const type of ['tool_execution_start', 'tool_execution_update', 'tool_execution_end', 'agent_start', 'agent_end']) on(type, () => refreshOmp());
+    pi.events?.on('task:subagent:lifecycle', data => {
+      const frame = record(data);
+      const id = trimmed(frame?.id);
+      if (!mainSession || !frame || !id) return;
+      if (frame.status === 'started') {
+        ompEnded.delete(id);
+        // Lifecycle frames carry no timestamp, so receipt time stands in until a job reports its own.
+        if (!ompSubagents.has(id)) ompSubagents.set(id, ompSubagentItem(id, frame, Date.now()));
+      } else if (OMP_ENDED.includes(frame.status as string)) {
+        ompEnded.add(id);
+        ompSubagents.delete(id);
+      } else return;
+      refreshOmp();
+    });
+    pi.events?.on('task:subagent:progress', data => {
+      const frame = record(data);
+      const progress = record(frame?.progress);
+      const id = trimmed(progress?.id);
+      if (!mainSession || !frame || !progress || !id || ompEnded.has(id)) return;
+      if (OMP_ENDED.includes(progress.status as string)) {
+        ompEnded.add(id);
+        ompSubagents.delete(id);
+      } else ompSubagents.set(id, ompSubagentItem(id, frame, ompSubagents.get(id)?.startedAt ?? Date.now()));
+      refreshOmp();
+    });
+  } else {
+    // pi-processes and pi-subagents publish over pi.events; hosts without it (older Pi) just never show background work.
+    pi.events?.on('processes:changed', () => {
+      if (!ctx) return;
+      refreshShells();
+      publishBackground();
+    });
+    for (const channel of ['subagents:rpc:v1:ready', 'subagent:async-started', 'subagent:async-complete', 'subagent:child-status', 'subagent:foreground-complete'])
+      pi.events?.on(channel, () => { if (ctx) refreshAgents(); });
+  }
 }
