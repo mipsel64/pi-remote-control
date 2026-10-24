@@ -1,8 +1,8 @@
 # Pi Remote Control
 
-Control your **already-running** [Pi](https://pi.dev) sessions from a phone or browser: live output, send prompts, stop runs, switch models, and get a notification when a prompt finishes or Pi needs your input.
+Control your **already-running** [Pi](https://pi.dev) or omp sessions from a phone or browser: live output, send prompts, stop runs, switch models, and get a notification when a prompt finishes or the agent needs your input.
 
-It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`@mipsel64/pi-remote-control` Pi extension**, which attaches a Pi session when you run `/rc`.
+It has two parts: the **`prc` server** (one binary with the web UI built in) and the **`@mipsel64/pi-remote-control` extension**, which attaches a Pi or omp session when you run `/rc`.
 
 ![Pi Remote Control demo: a Pi terminal session mirrored and controlled from a phone](docs/demo.gif)
 
@@ -27,7 +27,7 @@ prc setup    # writes ~/.config/prc/config.json and prints the admin password on
 prc serve    # http://127.0.0.1:8787
 ```
 
-**3. Attach Pi.** Install the extension, then run `/rc` inside any Pi session you want to control:
+**3. Attach Pi or omp.** Install the extension, then run `/rc` inside any session you want to control. For Pi:
 
 ```sh
 pi install npm:@mipsel64/pi-remote-control
@@ -50,7 +50,7 @@ For notifications on iPhone, open the address in Safari, tap **Share → Add to 
 
 To tell several servers apart on the Home Screen, pick an **App icon** colour in Settings before adding the shortcut. A shortcut keeps the icon it was added with, so remove it and add it again after changing the colour.
 
-## Pi commands
+## Pi and omp commands
 
 | Command | What it does |
 |---|---|
@@ -61,13 +61,15 @@ To tell several servers apart on the Home Screen, pick an **App icon** colour in
 
 Pi shows a one-time "Remote control connected" notice when `/rc` connects, and the footer shows `/rc connected` in green, or a warning while it retries (automatic reconnects are silent). Attach again after `/new` to add the new session to the list.
 
+For omp, the **Tasks** panel above the composer shows the current todo plan by phase, including task status and blockers. omp ask dialogs can be answered in the terminal or browser with single-choice, multi-choice, and custom answers; the local dialog stays active and the first answer wins. A final omp run clears **Thinking** and uses the same opt-in completion notifications as Pi.
+
 Web-submitted steering during a run appears under **queued** until Pi consumes it; prompts held during compaction/retry gaps are shown there too. Idle Send goes straight into the conversation without a pending row. This is a display, not a second delivery queue. Stop clears the display; Pi keeps ownership of native queue/editor restoration. Browser and agent reconnects retain pending previews in the same extension runtime.
 
 Pi's extension API exposes only whether native messages are pending, not their contents or dequeue events. The extension checks that flag every 250 ms while previews exist and reconciles confirmed pending entries when the native queue stays empty. Terminal dequeue/edit can therefore lag by a poll; clear-and-requeue between polls, or unrelated terminal messages still pending, can leave a preview until consumption or run settlement. Inputs transformed/handled by other extensions cannot be matched exactly during a continuing run; unconfirmed previews clear when it settles. Reloading the extension resets its display ledger. Terminal-only submissions are not mirrored in this list.
 
 ## Configuration
 
-Config files must be mode `0600`. Restart `prc` after changing `config.json`, and run `/rc close` then `/rc` in Pi after changing either file.
+Config files must be mode `0600`. Restart `prc` after changing `config.json`, and run `/rc close` then `/rc` in Pi or omp after changing either file.
 
 **Server:** `~/.config/prc/config.json`, created by `prc setup`:
 
@@ -84,12 +86,12 @@ Config files must be mode `0600`. Restart `prc` after changing `config.json`, an
 | Field | Required | Meaning |
 |---|---|---|
 | `publicOrigin` | yes | The exact URL your browser uses. Logins from other origins are rejected. |
-| `agentToken` | yes | Secret that Pi uses to connect. |
+| `agentToken` | yes | Secret that Pi or omp uses to connect. |
 | `adminPassword` | yes | Browser login password. |
 | `host`, `port` | no | Listen address. Default `127.0.0.1:8787`. |
 | `vapidPublicKey`, `vapidPrivateKey`, `vapidSubject` | no | Your own Web Push keys. By default they are generated automatically. |
 
-**Pi on another machine:** `~/.config/prc/client.json` on that machine. Use this when Pi does not run on the same machine as the server, or to override the URL or token that `/rc` reads from `config.json`:
+**Pi or omp on another machine:** `~/.config/prc/client.json` on that machine. Use this when the agent does not run on the same machine as the server, or to override the URL or token that `/rc` reads from `config.json`:
 
 ```json
 {
@@ -137,11 +139,11 @@ docker run -d --name prc --restart unless-stopped -p 127.0.0.1:8787:8787 \
   --env-file prc.env -v prc-state:/var/lib/prc ghcr.io/mipsel64/pi-remote-control:latest
 ```
 
-Tags: `vX.Y.Z`, `latest` (stable releases), and `nightly` (`main`). Keep the `prc-state` volume, which holds transcripts and push keys. Attach Pi with `PI_RC_URL=ws://localhost:8787/agent` and `PI_RC_AGENT_TOKEN` set to the token from `prc.env`.
+Tags: `vX.Y.Z`, `latest` (stable releases), and `nightly` (`main`). Keep the `prc-state` volume, which holds transcripts and push keys. Attach Pi or omp with `PI_RC_URL=ws://localhost:8787/agent` and `PI_RC_AGENT_TOKEN` set to the token from `prc.env`.
 
 ## Notifications
 
-Tap the **bell** in the top-right corner to be notified whenever a prompt finishes or Pi is waiting on a dialog (a crossed-out bell means off). Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. A notification's title is the session name; its text is a short excerpt of the final reply (its closing question, if it asks one) or the waiting dialog's title. Web Push payloads are encrypted end to end, but the excerpt can show on a locked screen; hide previews in your phone's notification settings if that matters.
+Tap the **bell** in the top-right corner to be notified whenever a prompt finishes or the agent is waiting on a dialog (a crossed-out bell means off). Over HTTPS, for example Tailscale Serve, it uses Web Push, which works on a locked phone. On `http://localhost`, notifications only appear while the tab is open. Push keys are generated on first start. A notification's title is the session name; its text is a short excerpt of the final reply (its closing question, if it asks one) or the waiting dialog's title. Web Push payloads are encrypted end to end, but the excerpt can show on a locked screen; hide previews in your phone's notification settings if that matters.
 
 ## Development
 

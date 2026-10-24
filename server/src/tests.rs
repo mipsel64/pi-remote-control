@@ -233,13 +233,22 @@ async fn auth_relay_reconnect_and_embedded_assets() {
             .clone()
     };
     assert_eq!(p2(&frame)["background"][0]["label"], "ci");
-    // Only the sanitized sessions frames reach browsers, never the agent's raw list events.
+    second_agent.send(WsMessage::Text(json!({"type":"event","processId":"p2","sessionId":"other","event":{"type":"todo_update","todos":[{"id":"t1","content":"Ship","status":"in_progress"}]}}).to_string().into())).await.unwrap();
+    assert_eq!(p2(&next(&mut browser).await)["todos"][0]["content"], "Ship");
+    second_agent.send(WsMessage::Text(json!({"type":"event","processId":"p2","sessionId":"other","event":{"type":"ask_update","ask":{"requestId":"r1","questions":[{"id":"q","question":"Ship?","options":[{"label":"Yes"}]}]}}}).to_string().into())).await.unwrap();
+    assert_eq!(p2(&next(&mut browser).await)["ask"]["requestId"], "r1");
+    let ask_notification = next(&mut browser).await;
+    assert_eq!(ask_notification["event"]["type"], "ask_update");
+    assert_eq!(ask_notification["event"]["ask"]["requestId"], "r1");
+    // List events stay sessions-only; a new ask also gets its sanitized notification event.
     second_agent.close(None).await.unwrap();
     let offline = next(&mut browser).await;
     assert_eq!(offline["type"], "sessions");
     let offline = p2(&offline);
     assert_eq!(offline["queued"], json!([]));
     assert_eq!(offline["background"], json!([]));
+    assert_eq!(offline["ask"], Value::Null);
+    assert_eq!(offline["todos"][0]["id"], "t1");
     task.abort();
 }
 #[tokio::test]
@@ -694,7 +703,7 @@ fn push_payload_names_the_finished_session() {
         payload("Fix the build"),
         json!({"title":"Fix the build","body":"Done","processId":"p","sessionId":"s"})
     );
-    let body = |event: Value| notice_body(&event);
+    let body = |event: Value| notice_body(&event, false);
     assert_eq!(
         body(json!({"type":"agent_settled"})).unwrap(),
         "Finished responding"
@@ -724,6 +733,31 @@ fn push_payload_names_the_finished_session() {
             .len(),
         200
     );
+    assert_eq!(
+        body(json!({"type":"agent_end","willContinue":false,"awaitingAsyncWork":false})).unwrap(),
+        "Finished responding"
+    );
+    assert_eq!(
+        body(json!({"type":"agent_end","summary":" Done "})).unwrap(),
+        "Done"
+    );
+    assert_eq!(
+        body(json!({"type":"agent_end","summary":"z".repeat(300)}))
+            .unwrap()
+            .len(),
+        200
+    );
+    for continuing in [
+        json!({"type":"agent_end","willContinue":true}),
+        json!({"type":"agent_end","awaitingAsyncWork":true}),
+    ] {
+        assert_eq!(body(continuing), None);
+    }
+    let ask = json!({"type":"ask_update","ask":{"requestId":"r1","questions":[{"id":"q","question":" Which? ","options":[]}]}});
+    assert_eq!(notice_body(&ask, false), None);
+    assert_eq!(notice_body(&ask, true).unwrap(), "Needs your input: Which?");
+    let long_ask = json!({"type":"ask_update","ask":{"requestId":"r1","questions":[{"id":"q","question":"x".repeat(200),"options":[]}]}});
+    assert_eq!(notice_body(&long_ask, true).unwrap().len(), 18 + 120);
     assert_eq!(payload("  ")["title"], "New Session");
     assert_eq!(payload(&"é".repeat(81))["title"], "é".repeat(80));
 }
@@ -1021,6 +1055,387 @@ fn background_items_are_validated_and_bounded() {
         &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false,"background":[{"kind":"agent","id":"fleet-1","label":"worker"}]})
     ));
     assert_eq!(background()[0]["label"], "worker");
+}
+
+#[test]
+fn todos_and_ask_are_validated_bounded_and_replaced_by_hello() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let (btx, mut browser) = mpsc::unbounded_channel();
+    app.inner
+        .lock()
+        .unwrap()
+        .browsers
+        .insert(Uuid::new_v4(), (String::new(), btx));
+    let info = || app.inner.lock().unwrap().sessions["p"].info("p");
+    // Browsers get sanitized state and, for a new ask, a sanitized in-page notification event.
+    let mut update = |event: Value| {
+        let had_ask = !info()["ask"].is_null();
+        let is_ask = event["type"] == "ask_update";
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":event})
+        ));
+        let frame: Value =
+            serde_json::from_str(browser.try_recv().unwrap().to_text().unwrap()).unwrap();
+        assert_eq!(frame["type"], "sessions");
+        let ask = frame["sessions"][0]["ask"].clone();
+        if is_ask && !had_ask && !ask.is_null() {
+            let notification: Value =
+                serde_json::from_str(browser.try_recv().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(
+                notification,
+                json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":ask}})
+            );
+        }
+        assert!(browser.try_recv().is_err());
+    };
+    assert_eq!(info()["todos"], json!([]));
+    assert_eq!(info()["ask"], Value::Null);
+
+    let many: Vec<_> = (0..=MAX_TODOS)
+        .map(|i| json!({"id":i.to_string(),"content":"x","status":"pending"}))
+        .collect();
+    let statuses: Vec<_> = [
+        "pending",
+        "in_progress",
+        "completed",
+        "abandoned",
+        "blocked",
+    ]
+    .iter()
+    .map(|status| json!({"id":status,"content":"x","status":status}))
+    .collect();
+    for (todos, expected) in [
+        (
+            json!([
+                {"id":"a","content":"Write","status":"in_progress","phase":"Build","blocker":"CI","extra":1},
+                {"id":"b","content":"Test","status":"blocked","phase":"p".repeat(257),"blocker":"b".repeat(1025)},
+                {"id":"c","content":"Odd","status":"started"},
+                {"id":"","content":"No id","status":"pending"},
+                {"id":"d","content":"c".repeat(1025),"status":"pending"},
+                {"id":"e","content":"","status":"pending"},
+                {"id":"f","status":"pending"},
+                "not an item",
+            ]),
+            json!([
+                {"id":"a","content":"Write","status":"in_progress","phase":"Build","blocker":"CI"},
+                {"id":"b","content":"Test","status":"blocked"},
+            ]),
+        ),
+        (json!(statuses), json!(statuses)),
+        (json!(many), json!(many[..MAX_TODOS])),
+        (json!({"id":"a"}), json!([])),
+    ] {
+        update(json!({"type":"todo_update","todos":todos}));
+        assert_eq!(info()["todos"], expected);
+    }
+
+    let ask = json!({"requestId":"r1","questions":[
+        {"id":"q1","question":"Which?","header":"Pick","options":[{"label":"A","description":"first","extra":1},{"label":"B"}],"recommended":1,"extra":true},
+        {"id":"q2","question":"Which many?","multi":true,"options":[{"label":"X"},{"label":"Y"}],"recommended":2},
+    ]});
+    update(json!({"type":"ask_update","ask":ask}));
+    assert_eq!(
+        info()["ask"],
+        json!({"requestId":"r1","questions":[
+            {"id":"q1","question":"Which?","header":"Pick","multi":false,"options":[{"label":"A","description":"first"},{"label":"B"}],"recommended":1},
+            {"id":"q2","question":"Which many?","multi":true,"options":[{"label":"X"},{"label":"Y"}]},
+        ]})
+    );
+    let question = json!({"id":"q","question":"Why?","options":[{"label":"A"}]});
+    let questions: Vec<_> = (0..=MAX_ASK_QUESTIONS)
+        .map(|i| json!({"id":i.to_string(),"question":"Why?","options":[]}))
+        .collect();
+    let options: Vec<_> = (0..=MAX_ASK_OPTIONS)
+        .map(|i| json!({"label":i.to_string()}))
+        .collect();
+    for bad in [
+        json!({"questions":[question]}),
+        json!({"requestId":"","questions":[question]}),
+        json!({"requestId":"r","questions":[]}),
+        json!({"requestId":"r","questions":"Why?"}),
+        json!({"requestId":"r","questions":[question, question]}),
+        json!({"requestId":"r","questions":[question, "not a question"]}),
+        json!({"requestId":"r","questions":questions}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"Why?","options":options}]}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"Why?","options":"A"}]}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"Why?","options":[{"label":""}]}]}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"Why?","options":[{"label":"A"},{"label":"A"}]}]}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"","options":[]}]}),
+        json!({"requestId":"r","questions":[{"id":"q","question":"x".repeat(1025),"options":[]}]}),
+    ] {
+        update(json!({"type":"ask_update","ask":ask}));
+        assert_eq!(info()["ask"]["requestId"], "r1");
+        update(json!({"type":"ask_update","ask":bad}));
+        assert_eq!(info()["ask"], Value::Null);
+    }
+    update(json!({"type":"ask_update","ask":ask}));
+    update(json!({"type":"ask_update","ask":null}));
+    assert_eq!(info()["ask"], Value::Null);
+
+    // A hello replaces both values; offline keeps the plan but never an answerable ask.
+    let hello = |extra: Value| {
+        let mut hello = json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false});
+        hello
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(agent_message(&app, id, &tx, &mut Some("p".into()), &hello));
+    };
+    hello(
+        json!({"todos":[{"id":"h","content":"After reconnect","status":"pending"}],"ask":{"requestId":"r2","questions":[{"id":"q","question":"Again?","options":[]}]}}),
+    );
+    assert_eq!(info()["todos"][0]["id"], "h");
+    assert_eq!(info()["ask"]["requestId"], "r2");
+    go_offline(&app, "p");
+    assert_eq!(info()["todos"][0]["id"], "h");
+    assert_eq!(info()["ask"], Value::Null);
+    hello(json!({}));
+    assert_eq!(info()["todos"], json!([]));
+    assert_eq!(info()["ask"], Value::Null);
+}
+
+#[test]
+fn ask_answers_must_match_the_pending_ask_and_are_forwarded_sanitized() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (tx, mut agent) = mpsc::unbounded_channel();
+    let id = Uuid::new_v4();
+    let ask = |request: &str| {
+        json!({"requestId":request,"questions":[
+            {"id":"one","question":"Pick one","options":[{"label":"A"},{"label":"B"},{"label":"C"}]},
+            {"id":"many","question":"Pick some","multi":true,"options":[{"label":"X"},{"label":"Y"},{"label":"Z"}]},
+        ]})
+    };
+    assert!(agent_message(
+        &app,
+        id,
+        &tx,
+        &mut None,
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/tmp","busy":false,"ask":ask("r1")})
+    ));
+    agent.try_recv().unwrap();
+    let parse =
+        |message: Message| serde_json::from_str::<Value>(message.to_text().unwrap()).unwrap();
+    let (btx, mut brx) = mpsc::unbounded_channel();
+    let mut answer = |v: Value| {
+        browser_message(&app, &btx, &v);
+        brx.try_recv().ok().map(parse)
+    };
+    let command = |request: &str, answers: Value| json!({"type":"ask_answer","processId":"p","sessionId":"s","requestId":request,"answers":answers});
+    let stale = Some(json!({"type":"error","message":"Invalid or stale command"}));
+    let mut wrong_session = command("r1", json!([{"id":"one","selectedOptions":["A"]}]));
+    wrong_session["sessionId"] = "old".into();
+    let mut no_request = command("r1", json!([{"id":"one","selectedOptions":["A"]}]));
+    no_request.as_object_mut().unwrap().remove("requestId");
+    for bad in [
+        wrong_session,
+        no_request,
+        command("old", json!([{"id":"one","selectedOptions":["A"]}])),
+        command("r1", json!([])),
+        command("r1", json!("A")),
+        command("r1", json!([{"id":"nope","selectedOptions":["A"]}])),
+        command("r1", json!([{"id":"one","selectedOptions":["Q"]}])),
+        command("r1", json!([{"id":"one","selectedOptions":["X"]}])),
+        command("r1", json!([{"id":"one","selectedOptions":["A","B"]}])),
+        command("r1", json!([{"id":"many","selectedOptions":["X","X"]}])),
+        command("r1", json!([{"id":"many","selectedOptions":[1]}])),
+        command("r1", json!([{"id":"many","selectedOptions":"X"}])),
+        command("r1", json!([{"id":"many"}])),
+        command(
+            "r1",
+            json!([{"id":"one","selectedOptions":["A"]},{"id":"one","selectedOptions":["B"]}]),
+        ),
+        command(
+            "r1",
+            json!([{"id":"one","selectedOptions":["A"]},{"id":"many","selectedOptions":["X"]},{"id":"one","selectedOptions":["B"]}]),
+        ),
+        command(
+            "r1",
+            json!([{"id":"one","selectedOptions":["A"],"customInput":7}]),
+        ),
+        command(
+            "r1",
+            json!([{"id":"one","selectedOptions":[],"customInput":"x".repeat(MAX_ASK_INPUT + 1)}]),
+        ),
+    ] {
+        assert_eq!(answer(bad), stale);
+    }
+    assert!(agent.try_recv().is_err());
+
+    let mut full = command(
+        "r1",
+        json!([{"id":"one","selectedOptions":["B"],"extra":1},{"id":"many","selectedOptions":["X","Z"],"customInput":"more"}]),
+    );
+    full["junk"] = true.into();
+    assert_eq!(answer(full), None);
+    assert_eq!(
+        parse(agent.try_recv().unwrap()),
+        json!({"type":"ask_answer","sessionId":"s","requestId":"r1","answers":[{"id":"one","selectedOptions":["B"]},{"id":"many","selectedOptions":["X","Z"],"customInput":"more"}]})
+    );
+    assert_eq!(
+        answer(command(
+            "r1",
+            json!([{"id":"one","selectedOptions":[],"customInput":"mine"}])
+        )),
+        None
+    );
+    assert_eq!(
+        parse(agent.try_recv().unwrap()),
+        json!({"type":"ask_answer","sessionId":"s","requestId":"r1","answers":[{"id":"one","selectedOptions":[],"customInput":"mine"}]})
+    );
+    assert!(agent.try_recv().is_err());
+
+    let set_ask = |value: Value| {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":value}})
+        ));
+    };
+    set_ask(ask("r2"));
+    assert_eq!(
+        answer(command("r1", json!([{"id":"one","selectedOptions":["A"]}]))),
+        stale
+    );
+    set_ask(Value::Null);
+    assert_eq!(
+        answer(command("r2", json!([{"id":"one","selectedOptions":["A"]}]))),
+        stale
+    );
+    assert!(agent.try_recv().is_err());
+    set_ask(ask("r3"));
+    go_offline(&app, "p");
+    assert_eq!(
+        answer(command("r3", json!([{"id":"one","selectedOptions":["A"]}]))),
+        Some(json!({"type":"error","message":"Process is offline"}))
+    );
+    assert!(agent.try_recv().is_err());
+}
+
+#[test]
+fn omp_agent_end_clears_busy_only_when_the_run_is_final() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let info = || app.inner.lock().unwrap().sessions["p"].info("p");
+    let event = |event: Value| {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":event})
+        ))
+    };
+    event(json!({"type":"agent_start"}));
+    assert_eq!(info()["busy"], true);
+    app.inner
+        .lock()
+        .unwrap()
+        .sessions
+        .get_mut("p")
+        .unwrap()
+        .busy_since = Some(1000);
+    for continuing in [
+        json!({"type":"agent_end","willContinue":true,"awaitingAsyncWork":false}),
+        json!({"type":"agent_end","willContinue":false,"awaitingAsyncWork":true}),
+    ] {
+        event(continuing);
+        assert_eq!(info()["busy"], true);
+        assert_eq!(info()["busySince"], 1000);
+    }
+    event(json!({"type":"agent_start"}));
+    assert!(info()["busySince"].as_u64().unwrap() > 1000);
+    event(json!({"type":"agent_end","willContinue":false,"awaitingAsyncWork":false}));
+    assert_eq!(info()["busy"], false);
+    assert_eq!(info()["busySince"], Value::Null);
+    event(json!({"type":"agent_start"}));
+    assert!(info()["busySince"].as_u64().unwrap() > 1000);
+    event(json!({"type":"agent_settled"}));
+    assert_eq!(info()["busy"], false);
+    assert_eq!(info()["busySince"], Value::Null);
+}
+
+#[test]
+fn omp_agent_end_relay_omits_messages() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let (btx, mut browser) = mpsc::unbounded_channel();
+    app.inner
+        .lock()
+        .unwrap()
+        .browsers
+        .insert(Uuid::new_v4(), (String::new(), btx));
+    let event = |event: Value| {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":event})
+        ));
+    };
+    let next = |browser: &mut mpsc::UnboundedReceiver<Message>| {
+        serde_json::from_str::<Value>(browser.try_recv().unwrap().to_text().unwrap()).unwrap()
+    };
+
+    event(
+        json!({"type":"agent_end","willContinue":true,"awaitingAsyncWork":false,"messages":[{"role":"user","content":"secret"}],"extra":"secret"}),
+    );
+    assert_eq!(
+        next(&mut browser),
+        json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"agent_end","willContinue":true,"awaitingAsyncWork":false}})
+    );
+    assert!(browser.try_recv().is_err());
+
+    event(
+        json!({"type":"agent_end","summary":"Done","willContinue":false,"awaitingAsyncWork":false,"asking":false,"messages":[{"role":"assistant","content":"secret"}]}),
+    );
+    assert_eq!(next(&mut browser)["type"], "sessions");
+    assert_eq!(
+        next(&mut browser),
+        json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"agent_end","summary":"Done","willContinue":false,"awaitingAsyncWork":false,"asking":false}})
+    );
+    assert!(browser.try_recv().is_err());
+}
+
+#[test]
+fn pending_ask_marks_online_session_waiting() {
+    let state = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(state.path()));
+    let (id, tx) = attach(&app, "p", "s", 0);
+    let info = || app.inner.lock().unwrap().sessions["p"].info("p");
+    let ask = |ask: Value| {
+        assert!(agent_message(
+            &app,
+            id,
+            &tx,
+            &mut Some("p".into()),
+            &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":ask}})
+        ));
+    };
+    let pending =
+        json!({"requestId":"r1","questions":[{"id":"q","question":"Ship?","options":[]}]});
+    assert_eq!(info()["waiting"], false);
+    ask(pending.clone());
+    assert_eq!(info()["waiting"], true);
+    ask(pending);
+    assert_eq!(info()["waiting"], true);
+    ask(Value::Null);
+    assert_eq!(info()["waiting"], false);
+    ask(json!({"requestId":"r2","questions":[{"id":"q","question":"Again?","options":[]}]}));
+    assert_eq!(info()["waiting"], true);
+    go_offline(&app, "p");
+    assert_eq!(info()["waiting"], false);
 }
 
 #[test]

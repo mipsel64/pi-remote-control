@@ -80,6 +80,8 @@ function connectionSettings(): { url?: string; token?: string; urlSource: string
 
 type Model = NonNullable<ExtensionContext['model']>;
 const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+// How often a non-idle omp run without its final agent_end is rechecked.
+const IDLE_POLL_MS = 100;
 
 // Mirrors pi-ai getSupportedThinkingLevels without importing pi-ai at runtime.
 function thinkingLevels(model: Model) {
@@ -118,18 +120,21 @@ function contextUsage(current: ExtensionContext) {
 }
 
 // Server cap is 256 UTF-16 units; cut on code points so a surrogate pair is never split.
-function preview(text: string, max = 200) {
-  const flat = text.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
+function clip(text: string, max: number) {
+  if (text.length <= max) return text;
   let cut = '';
-  for (const char of flat) {
+  for (const char of text) {
     if (cut.length + char.length > max - 1) break;
     cut += char;
   }
   return `${cut}…`;
 }
+function preview(text: string, max = 200) {
+  return clip(text.replace(/\s+/g, ' ').trim(), max);
+}
 
 type Fields = Record<string, unknown>;
+const record = (value: unknown) => value && typeof value === 'object' ? value as Fields : undefined;
 type Background = { kind: 'shell' | 'agent'; id: string; label: string; detail: string; full?: string; startedAt: number | null };
 // Servers before 0.1.6 drop a `detail` over 256 units, so the longer form travels in its own field, sent only when `detail` was cut.
 function describe(text: string) {
@@ -177,6 +182,122 @@ function lastReply(entries: ReturnType<ExtensionContext['sessionManager']['getBr
   return { asking, summary: summary.length > 160 ? `${summary.slice(0, 159)}…` : summary };
 }
 
+const TODO_STATUSES = ['pending', 'in_progress', 'completed', 'abandoned', 'blocked'];
+type Todo = { id: string; content: string; status: string; phase?: string; blocker?: string };
+
+type TodoPhase = { name: string; tasks: { content: string; status: string; blocker?: unknown }[] };
+
+// omp's todo tool reports its whole plan as `details.phases`.
+function todoPhases(value: unknown) {
+  const valid = Array.isArray(value) && value.every(phase => typeof phase?.name === 'string' && Array.isArray(phase.tasks)
+    && phase.tasks.every(task => typeof task?.content === 'string' && TODO_STATUSES.includes(task.status)));
+  return valid ? value as TodoPhase[] : undefined;
+}
+
+// The server drops items past its text caps, so cut to them.
+function flattenTodos(phases: TodoPhase[]): Todo[] {
+  return phases.flatMap((phase, i) => phase.tasks.flatMap((task, j) => {
+    const content = preview(task.content, 1024);
+    if (!content) return [];
+    const group = preview(phase.name, 256);
+    const blocker = typeof task.blocker === 'string' ? preview(task.blocker, 1024) : '';
+    return [{ id: `${i}.${j}`, content, status: task.status, ...(group ? { phase: group } : {}), ...(blocker ? { blocker } : {}) }];
+  }));
+}
+
+// Latest durable plan on the branch: a successful todo result or the user's own edit. Views and errors never change it.
+function branchTodos(entries: unknown[]): Todo[] {
+  for (const entry of entries.toReversed()) {
+    const item = record(entry);
+    const message = record(item?.message);
+    const details = record(message?.details);
+    const edit = item?.type === 'custom' && item.customType === 'user_todo_edit' ? record(item.data) : undefined;
+    const result = item?.type === 'message' && message?.role === 'toolResult' && message.toolName === 'todo' && !message.isError && details?.op !== 'view' ? details : undefined;
+    const phases = todoPhases((edit ?? result)?.phases);
+    if (phases) return flattenTodos(phases);
+  }
+  return [];
+}
+
+const MAX_ASK_QUESTIONS = 20;
+const MAX_ASK_OPTIONS = 50;
+const MAX_ASK_INPUT = 16 * 1024;
+type AskQuestion = { id: string; question: string; header?: string; options: { label: string; description?: string }[]; multi?: boolean; recommended?: number };
+type AskAnswer = { selectedOptions: string[]; customInput?: string };
+type AskResult = AskAnswer & { id: string; question: string; options: string[]; multi: boolean };
+type AskEntry = { requestId: string; questions: AskQuestion[]; local: AbortController; answers?: AskAnswer[]; answered: Promise<void>; resolve: () => void };
+type InvokeTool = (params: Fields, options?: { signal?: AbortSignal; onUpdate?: unknown }) => Promise<unknown>;
+
+// Only asks a browser can answer exactly are offered: the server drops one it cannot hold, and answers must match ids and labels verbatim.
+function askQuestions(params: unknown) {
+  const list = record(params)?.questions;
+  if (!Array.isArray(list) || !list.length || list.length > MAX_ASK_QUESTIONS) return undefined;
+  const questions: AskQuestion[] = [];
+  for (const raw of list as Fields[]) {
+    if (!raw || typeof raw.id !== 'string' || !raw.id || raw.id.length > 256 || typeof raw.question !== 'string' || !raw.question.trim()
+      || !Array.isArray(raw.options) || raw.options.length > MAX_ASK_OPTIONS || questions.some(question => question.id === raw.id)) return undefined;
+    const options: AskQuestion['options'] = [];
+    for (const option of raw.options as Fields[]) {
+      if (!option || typeof option.label !== 'string' || !option.label || option.label.length > 256 || options.some(known => known.label === option.label)) return undefined;
+      const description = typeof option.description === 'string' ? option.description.trim() : '';
+      options.push({ label: option.label, ...(description ? { description } : {}) });
+    }
+    const header = typeof raw.header === 'string' ? raw.header.trim() : '';
+    questions.push({ id: raw.id, question: raw.question, ...(header ? { header } : {}), options,
+      ...(typeof raw.multi === 'boolean' ? { multi: raw.multi } : {}), ...(typeof raw.recommended === 'number' ? { recommended: raw.recommended } : {}) });
+  }
+  return questions;
+}
+
+function askPrompt(entry: AskEntry | undefined) {
+  if (!entry) return null;
+  return { requestId: entry.requestId, questions: entry.questions.map(question => ({ id: question.id, question: clip(question.question, 1024),
+    ...(question.header ? { header: clip(question.header, 256) } : {}),
+    options: question.options.map(option => ({ label: option.label, ...(option.description ? { description: clip(option.description, 1024) } : {}) })),
+    ...(question.multi !== undefined ? { multi: question.multi } : {}),
+    ...(question.recommended !== undefined && Number.isInteger(question.recommended) && question.recommended >= 0 && question.recommended < question.options.length ? { recommended: question.recommended } : {}) })) };
+}
+
+// One answer per question, in order. Unanswered questions record no selection, like a question the terminal user skipped.
+function askAnswers(questions: AskQuestion[], given: unknown) {
+  if (!Array.isArray(given) || !given.length || given.length > questions.length) return undefined;
+  const answers = new Map<string, AskAnswer>();
+  for (const item of given as Fields[]) {
+    const question = questions.find(candidate => candidate.id === item?.id);
+    if (!question || answers.has(question.id)) return undefined;
+    const { selectedOptions, customInput } = item;
+    if (!Array.isArray(selectedOptions) || selectedOptions.length > (question.multi ? question.options.length : 1)
+      || !selectedOptions.every((label, index) => typeof label === 'string' && question.options.some(option => option.label === label) && selectedOptions.indexOf(label) === index)) return undefined;
+    if (customInput != null && (typeof customInput !== 'string' || Buffer.byteLength(customInput) > MAX_ASK_INPUT)) return undefined;
+    const custom = typeof customInput === 'string' && customInput.trim() ? customInput.replace(/\r\n?/g, '\n') : undefined;
+    if (!question.multi && !selectedOptions.length && custom === undefined) return undefined;
+    answers.set(question.id, { selectedOptions, ...(custom !== undefined ? { customInput: custom } : {}) });
+  }
+  return questions.map(question => answers.get(question.id) ?? { selectedOptions: [] });
+}
+
+// Same result text and details the native ask tool produces for a dialog answer, so the model cannot tell the surfaces apart.
+function askResult(questions: AskQuestion[], answers: AskAnswer[]) {
+  const results: AskResult[] = questions.map((question, index) => ({ id: question.id, question: question.question,
+    options: question.options.map(option => option.label), multi: question.multi ?? false, ...answers[index] }));
+  if (results.length > 1) return { content: [{ type: 'text', text: `User answers:\n${results.map(answerLine).join('\n')}` }], details: { results } };
+  const [result] = results;
+  const parts: string[] = [];
+  if (result.selectedOptions.length) parts.push(`User selected: ${result.multi ? result.selectedOptions.join(', ') : result.selectedOptions[0]}`);
+  if (result.customInput !== undefined)
+    parts.push(result.customInput.includes('\n') ? `User provided custom input:\n${result.customInput.split('\n').map(line => `  ${line}`).join('\n')}` : `User provided custom input: ${result.customInput}`);
+  const text = parts.length ? parts.join('\n') : result.multi ? 'User did not select any options' : 'User cancelled the selection';
+  return { content: [{ type: 'text', text }],
+    details: { question: result.question, options: result.options, multi: result.multi, selectedOptions: result.selectedOptions, customInput: result.customInput } };
+}
+
+function answerLine(result: AskResult) {
+  const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
+  if (!result.selectedOptions.length) return custom !== undefined ? `${result.id}: ${custom}` : result.multi ? `${result.id}: []` : `${result.id}: (cancelled)`;
+  const picked = result.multi ? `[${result.selectedOptions.join(', ')}]` : result.selectedOptions[0];
+  return `${result.id}: ${custom === undefined ? picked : `${picked} + ${custom}`}`;
+}
+
 function saveClientUrl(url: string) {
   const { client } = configFiles();
   const existing = readPrivateConfig(client);
@@ -203,6 +324,8 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
   let ctx: ExtensionContext | undefined;
   let socket: WebSocket | undefined;
+  // processId of the socket's first hello; the server binds the connection to it.
+  let socketProcessId: string | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let delay = 1000;
   let settings: ReturnType<typeof connectionSettings> | undefined;
@@ -214,6 +337,10 @@ export default function remoteControl(pi: ExtensionAPI) {
   // Tracked while disconnected too, so a reconnect during an open dialog still reports it.
   let waiting = false;
   let asking = false;
+  // Track runs separately from isIdle(), which is also false during compaction; omp reconciles stale runs when idle returns.
+  let running = false;
+  let runGeneration = 0;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
   // Pi rejects prompts during manual compaction; only hold them between active runs.
   // Kept across /rc close: the run still settles and delivers it.
   let queued: string[] = [];
@@ -229,6 +356,14 @@ export default function remoteControl(pi: ExtensionAPI) {
   let sentBackground = '[]';
   let agentsRequest: string | undefined;
   let agentsStale = false;
+  // omp uses final agent_end as settlement and injects schema builders into its extension API.
+  const omp = 'arktype' in pi;
+  // The agent's plan, flattened from omp todo results; sent in hello and whenever it changes.
+  let todos: Todo[] = [];
+  let sentTodos = '[]';
+  // The one open omp ask a browser can answer. The local dialog stays live; the first answer wins.
+  let pendingAsk: AskEntry | undefined;
+  let askRegistered = false;
   // Each kind keeps half the slots when both overflow, so many shells never hide every subagent.
   const background = () => {
     const agentSlots = Math.min(agents.length, Math.max(MAX_BACKGROUND / 2, MAX_BACKGROUND - shells.length));
@@ -340,6 +475,69 @@ export default function remoteControl(pi: ExtensionAPI) {
     current.ui.setEditorText([text, current.ui.getEditorText()].filter(part => part.trim()).join('\n\n'));
   }
 
+  function publishTodos(current: ExtensionContext) {
+    const json = JSON.stringify(todos);
+    if (!ctx || json === sentTodos) return;
+    sentTodos = json;
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'todo_update', todos } });
+  }
+
+  function publishAsk(current: ExtensionContext) {
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'ask_update', ask: askPrompt(pendingAsk) } });
+  }
+  // Dismisses the local dialog too; callers that cannot publish (a replaced context) rely on the hello that follows.
+  function cancelAsk(current?: ExtensionContext) {
+    const entry = pendingAsk;
+    if (!entry) return;
+    pendingAsk = undefined;
+    entry.local.abort();
+    if (current) publishAsk(current);
+  }
+  function answerAsk(current: ExtensionContext, command: { requestId?: unknown; answers?: unknown }) {
+    const entry = pendingAsk;
+    if (!entry || command.requestId !== entry.requestId) return;
+    const answers = askAnswers(entry.questions, command.answers);
+    if (!answers) return;
+    entry.answers = answers;
+    pendingAsk = undefined;
+    entry.resolve();
+    entry.local.abort();
+    publishAsk(current);
+  }
+  async function askExecute(_toolCallId: string, params: Fields, signal: AbortSignal | undefined, onUpdate: unknown, toolCtx: ExtensionContext & { invokeTool?: InvokeTool }) {
+    if (!toolCtx.invokeTool) throw new Error('Ask tool requires interactive mode');
+    const questions = pendingAsk ? undefined : askQuestions(params);
+    if (!questions) return toolCtx.invokeTool(params, { signal, onUpdate });
+    const { promise: answered, resolve } = Promise.withResolvers<void>();
+    const entry: AskEntry = { requestId: randomUUID(), questions, local: new AbortController(), answered, resolve };
+    pendingAsk = entry;
+    if (ctx) publishAsk(ctx);
+    try {
+      // The native tool owns the dialog, timeout and result; aborting `local` makes it throw, which a browser answer then discards.
+      const dialog = toolCtx.invokeTool(params, { signal: signal ? AbortSignal.any([signal, entry.local.signal]) : entry.local.signal, onUpdate });
+      const result = await Promise.race([dialog, answered]);
+      return entry.answers ? askResult(questions, entry.answers) : result;
+    } catch (error) {
+      if (entry.answers) return askResult(questions, entry.answers);
+      throw error;
+    } finally {
+      if (pendingAsk === entry) {
+        pendingAsk = undefined;
+        if (ctx) publishAsk(ctx);
+      }
+    }
+  }
+  // omp's ask dialog has no passive hook, so re-register over the native tool only after /rc opts in.
+  function registerAsk() {
+    if (!omp || askRegistered) return;
+    const native = pi.getAllTools().find(tool => tool.name === 'ask' && tool.sourceInfo?.source === 'builtin');
+    if (!native) return;
+    askRegistered = true;
+    // Preserve every metadata/example/render field the host exposes; only execution needs to change.
+    pi.registerTool({ label: 'Ask', approval: 'read', strict: true, concurrency: 'exclusive', loadMode: 'discoverable',
+      ...native, execute: askExecute } as never);
+  }
+
   function title(current: ExtensionContext, pending?: { role?: string; content?: unknown }) {
     const name = pi.getSessionName();
     if (name) return name;
@@ -367,8 +565,14 @@ export default function remoteControl(pi: ExtensionAPI) {
     settings = undefined;
     if (retry) clearTimeout(retry);
     retry = undefined;
+    dropSocket();
+  }
+
+  // Closes the current socket without the close handler's retry or warning.
+  function dropSocket() {
     const ws = socket;
     socket = undefined;
+    socketProcessId = undefined;
     ws?.close();
   }
 
@@ -423,6 +627,7 @@ export default function remoteControl(pi: ExtensionAPI) {
           return;
         }
         ctx = current;
+        registerAsk();
         status(current, connectionState() === 'retrying' ? 'retrying' : 'connecting');
         if (socket?.readyState === WebSocket.OPEN) {
           hello(current);
@@ -476,11 +681,15 @@ export default function remoteControl(pi: ExtensionAPI) {
     const model = current.model;
     const list = background();
     sentBackground = JSON.stringify(list);
-    send({ type: 'hello', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, host: os.hostname().split('.')[0], branch: lastBranch, busy: !current.isIdle(), waiting, asking, updatedAt,
+    sentTodos = JSON.stringify(todos);
+    socketProcessId = entryId(current);
+    send({ type: 'hello', processId: socketProcessId, sessionId: current.sessionManager.getSessionId(), name: lastTitle, cwd: current.cwd, host: os.hostname().split('.')[0], branch: lastBranch, busy: running && (!omp || !current.isIdle()), waiting, asking, updatedAt,
       model: model ? { provider: model.provider, id: model.id, name: model.name, reasoning: Boolean(model.reasoning), thinkingLevels: thinkingLevels(model) } : null,
       context: contextUsage(current),
       queued: previews(),
       background: list,
+      todos,
+      ask: askPrompt(pendingAsk),
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
   }
@@ -489,6 +698,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     if (!ctx || socket || !settings?.url || !settings.token) return;
     const ws = new WebSocket(settings.url, { headers: { Authorization: `Bearer ${settings.token}` } });
     socket = ws;
+    socketProcessId = undefined;
     ws.on('open', () => {
       if (socket !== ws || !ctx) return;
       delay = 1000;
@@ -500,7 +710,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     });
     ws.on('message', raw => {
       if (socket !== ws || !ctx) return;
-      let command: { type?: unknown; sessionId?: unknown; text?: unknown; provider?: unknown; modelId?: unknown; level?: unknown; name?: unknown };
+      let command: { type?: unknown; sessionId?: unknown; text?: unknown; provider?: unknown; modelId?: unknown; level?: unknown; name?: unknown; requestId?: unknown; answers?: unknown };
       try { command = JSON.parse(raw.toString()); } catch { return; }
       const current = ctx;
       if (!command || typeof command !== 'object' || command.sessionId !== current.sessionManager.getSessionId()) return;
@@ -522,6 +732,7 @@ export default function remoteControl(pi: ExtensionAPI) {
       } else if (command.type === 'set_thinking' && THINKING_LEVELS.includes(command.level as never))
         pi.setThinkingLevel(command.level as typeof THINKING_LEVELS[number]);
       else if (command.type === 'rename' && typeof command.name === 'string' && command.name.length <= 1024) pi.setSessionName(command.name.trim());
+      else if (command.type === 'ask_answer') answerAsk(current, command);
     });
     // Connection errors close the socket; the close handler retries.
     ws.on('error', () => {});
@@ -539,11 +750,24 @@ export default function remoteControl(pi: ExtensionAPI) {
     });
   }
 
-  pi.on('session_start', (_event, current) => {
+  function sessionReplaced(current: ExtensionContext) {
+    stopIdleWatch();
+    // The server binds each connection to the processId of its first hello, so a different session needs a fresh connection.
+    // Drop it before anything below publishes for the new session on the old socket.
+    if (socket && socketProcessId !== undefined && socketProcessId !== entryId(current)) dropSocket();
+    runGeneration++;
+    running = false;
+    waiting = false;
+    asking = false;
+    stopped = false;
+    runSignal = undefined;
+    cancelAsk();
+    todos = branchTodos(current.sessionManager.getBranch());
     clearPending(current);
     if (queued.length) restoreQueued(current);
     if (!ctx) return;
     ctx = current;
+    publishTodos(current);
     if (socket?.readyState === WebSocket.OPEN) {
       hello(current);
       status(current, 'connected');
@@ -551,7 +775,13 @@ export default function remoteControl(pi: ExtensionAPI) {
       status(current, failed ? 'retrying' : 'connecting');
       connect();
     }
-  });
+  }
+  pi.on('session_start', (_event, current) => sessionReplaced(current));
+  if (omp) {
+    // These omp replacement events are not in Pi's ExtensionAPI overloads.
+    const on = pi.on as (event: string, handler: (event: unknown, current: ExtensionContext) => void) => void;
+    for (const type of ['session_switch', 'session_branch']) on(type, (_event, current) => sessionReplaced(current));
+  }
   pi.on('session_info_changed', (_event, current) => {
     if (socket?.readyState === WebSocket.OPEN) hello(current);
   });
@@ -560,7 +790,11 @@ export default function remoteControl(pi: ExtensionAPI) {
       if (ctx && socket?.readyState === WebSocket.OPEN) sendHello(current);
     });
   }
-  pi.on('session_tree', (_event, current) => snapshot(current));
+  pi.on('session_tree', (_event, current) => {
+    snapshot(current);
+    todos = branchTodos(current.sessionManager.getBranch());
+    publishTodos(current);
+  });
   pi.on('message_start', (event, current) => {
     if (event.message.role !== 'user') return;
     const content = event.message.content;
@@ -571,52 +805,111 @@ export default function remoteControl(pi: ExtensionAPI) {
       publishQueue(current);
     }
   });
-  for (const type of ['message_start', 'message_update', 'message_end', 'agent_start', 'agent_settled', 'ui_prompt_start', 'ui_prompt_end'] as const) {
+  for (const type of ['message_start', 'message_update', 'message_end', 'agent_start', 'ui_prompt_start', 'ui_prompt_end'] as const) {
     pi.on(type, (event, current) => {
       if (type === 'ui_prompt_start' || type === 'ui_prompt_end') waiting = type === 'ui_prompt_start';
-      if (type === 'agent_start') asking = false;
-      // Handled/transformed/rejected input has no public completion event; settlement is the final bound.
-      if (type === 'agent_settled') clearPending(current);
+      if (type === 'agent_start') {
+        stopIdleWatch();
+        asking = false;
+        running = true;
+        runGeneration++;
+      }
       // Per low-level run, so keep the latest; it also catches a Stop pressed during a tool call.
       if (type === 'agent_start' || type === 'message_start') runSignal = current.signal ?? runSignal;
       if (type === 'agent_start' && queued.length && !stopped && !runSignal?.aborted) sendQueued(current);
-      const usage = type === 'message_end' || type === 'agent_settled' ? contextUsage(current) : null;
-      let payload: object = usage ? { ...event, contextUsage: usage } : event;
-      if (type === 'agent_settled') {
-        const reply = lastReply(current.sessionManager.getBranch());
-        asking = reply.asking;
-        payload = { ...payload, asking, ...(reply.summary ? { summary: reply.summary } : {}) };
-      }
+      const usage = type === 'message_end' ? contextUsage(current) : null;
+      const payload: object = usage ? { ...event, contextUsage: usage } : event;
       if (ctx && type === 'message_end' && socket?.readyState === WebSocket.OPEN && 'message' in event && title(current, event.message) !== lastTitle)
         hello(current, event.message);
-      // Tools may switch branches during a run.
-      if (ctx && type === 'agent_settled' && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
       send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
-      if (type === 'agent_settled') {
-        // Native steering is owned by Pi; only restore prompts held between runs here.
-        if (queued.length && (stopped || runSignal?.aborted)) restoreQueued(current);
-        else if (queued.length) sendQueued(current);
+    });
+  }
+  function settle(current: ExtensionContext, event: object) {
+    stopIdleWatch();
+    runGeneration++;
+    running = false;
+    // Handled/transformed/rejected input has no public completion event; settlement is the final bound.
+    clearPending(current);
+    const usage = contextUsage(current);
+    const reply = lastReply(current.sessionManager.getBranch());
+    asking = reply.asking;
+    const payload = { ...event, ...(usage ? { contextUsage: usage } : {}), asking, ...(reply.summary ? { summary: reply.summary } : {}) };
+    // Tools may switch branches during a run.
+    if (ctx && socket?.readyState === WebSocket.OPEN && gitBranch(current.cwd) !== lastBranch) sendHello(current);
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: payload });
+    // Native steering is owned by Pi; only restore prompts held between runs here.
+    if (queued.length && (stopped || runSignal?.aborted)) restoreQueued(current);
+    else if (queued.length) sendQueued(current);
+    stopped = false;
+    runSignal = undefined;
+  }
+  pi.on('agent_settled', (event, current) => settle(current, event));
+  // Pi also emits agent_end per low-level run, so only omp listens. Never forward its message payload.
+  if (omp) pi.on('agent_end', (event, current) => {
+    const end = record(event);
+    if (end?.willContinue === true || end?.awaitingAsyncWork === true) {
+      watchIdle(current);
+      return;
+    }
+    const messages = Array.isArray(end?.messages) ? end.messages : [];
+    // omp appends placeholder toolResults after an aborted assistant, so check the last assistant, not the tail.
+    const finalAssistant = record(messages.findLast(message => record(message)?.role === 'assistant'));
+    if (finalAssistant?.stopReason === 'aborted') stopped = true;
+    settle(current, { type: 'agent_settled' });
+  });
+  pi.on('tool_result', (event, current) => {
+    if (event.toolName !== 'todo' || event.isError) return;
+    const phases = todoPhases(record(event.details)?.phases);
+    if (!phases) return;
+    todos = flattenTodos(phases);
+    publishTodos(current);
+  });
+  // Settle an omp run whose final agent_end was lost; a new run, settlement, or session stops the watch.
+  // A scheduled continuation keeps omp non-idle without a new agent_start, so keep polling that run until idle.
+  // The same tick retains Pi's held-prompt delivery after manual compaction without inventing a run.
+  function stopIdleWatch() {
+    clearTimeout(idleTimer);
+    idleTimer = undefined;
+  }
+  function watchIdle(current: ExtensionContext, wait = 0) {
+    stopIdleWatch();
+    const generation = runGeneration;
+    const timer = idleTimer = setTimeout(() => {
+      if (idleTimer === timer) idleTimer = undefined;
+      if (generation !== runGeneration) return;
+      try {
+        if (!current.isIdle()) {
+          if (omp && running) watchIdle(current, IDLE_POLL_MS);
+          return;
+        }
+        if (omp && running) {
+          settle(current, { type: 'agent_settled' });
+          return;
+        }
+        if (queued.length) {
+          if (stopped) restoreQueued(current);
+          else sendQueued(current);
+        }
         stopped = false;
         runSignal = undefined;
-      }
-    });
+      } catch { /* The runtime was replaced (/reload, /new) before the tick. */ }
+    }, wait);
+    timer.unref?.();
   }
-  // A manual /compact is not an agent run; Pi goes idle right after this event, so deliver on the next tick.
-  for (const type of ['session_compact', 'session_compact_failed'] as const) {
-    pi.on(type, (_event, current) => {
-      setTimeout(() => {
-        try {
-          if (!current.isIdle()) return;
-          if (queued.length) {
-            if (stopped) restoreQueued(current);
-            else sendQueued(current);
-          }
-          stopped = false;
-        } catch { /* The runtime was replaced (/reload, /new) before the tick. */ }
-      }, 0);
-    });
-  }
-  pi.on('session_shutdown', (_event, current) => { clearPending(current); stop(); });
+  for (const type of ['session_compact', 'session_compact_failed'] as const)
+    pi.on(type, (_event, current) => watchIdle(current));
+  pi.on('session_shutdown', (_event, current) => {
+    stopIdleWatch();
+    runGeneration++;
+    running = false;
+    waiting = false;
+    asking = false;
+    stopped = false;
+    runSignal = undefined;
+    cancelAsk(current);
+    clearPending(current);
+    stop();
+  });
   // Optional chaining: hosts without pi.events (older Pi, omp) just never show background work.
   pi.events?.on('processes:changed', () => {
     if (!ctx) return;

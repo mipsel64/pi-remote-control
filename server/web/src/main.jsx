@@ -145,6 +145,153 @@ function Item({ item, live }) {
     : <details className="custom-card"><summary>{line}<Chevron /></summary><div className="plain">{item.text}</div></details>;
 }
 
+const TODO_CIRCLE = <circle cx="12" cy="12" r="9" />;
+const TODO_STATUS = {
+  pending: { label: 'pending', mark: TODO_CIRCLE },
+  in_progress: { label: 'in progress', tag: true, mark: <>{TODO_CIRCLE}<path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" /></> },
+  completed: { label: 'completed', mark: <>{TODO_CIRCLE}<path d="m8 12.5 3 3 5-6" /></> },
+  abandoned: { label: 'abandoned', tag: true, mark: <>{TODO_CIRCLE}<path d="M8 12h8" /></> },
+  blocked: { label: 'blocked', tag: true, mark: <>{TODO_CIRCLE}<path d="M12 8v4M12 16h.01" /></> },
+};
+const todoStatus = todo => Object.hasOwn(TODO_STATUS, todo.status) ? todo.status : 'pending';
+const visibleTodos = todos => Array.isArray(todos) ? todos.filter(todo => typeof todo?.content === 'string' && todo.content.trim()) : [];
+
+// Consecutive tasks with the same phase share one heading; tasks without a phase get none.
+function todoGroups(todos) {
+  const groups = [];
+  for (const todo of todos) {
+    const phase = typeof todo.phase === 'string' ? todo.phase.trim() : '';
+    if (groups.at(-1)?.phase === phase) groups.at(-1).todos.push(todo);
+    else groups.push({ phase, todos: [todo] });
+  }
+  return groups;
+}
+
+// Abandoned tasks are dropped from the denominator so a finished plan still reads n/n.
+function todoProgress(todos) {
+  const counted = todos.filter(todo => todoStatus(todo) !== 'abandoned');
+  return { done: counted.filter(todo => todoStatus(todo) === 'completed').length, total: counted.length,
+    current: todos.find(todo => todoStatus(todo) === 'in_progress') ?? todos.find(todo => todoStatus(todo) === 'blocked') };
+}
+
+function TodoPanel({ todos, open, onToggle, panelRef }) {
+  const uid = useId();
+  const { done, total, current } = todoProgress(todos);
+  return <details ref={panelRef} className="todos" open={open} onToggle={event => onToggle(event.currentTarget.open)}>
+    <summary><Icon className="todo-summary-icon"><path d="m3 17 2 2 4-4" /><path d="m3 7 2 2 4-4" /><path d="M13 6h8M13 12h8M13 18h8" /></Icon>
+      <b>Tasks</b>
+      {total > 0 && <><span className="todo-count" aria-hidden="true">{done}/{total}</span><span className="sr-only">, {done} of {total} done</span></>}
+      {current && <span className="todo-current"><span className="sr-only">Current: </span>{current.content}</span>}<Chevron /></summary>
+    <div className="todo-list">{todoGroups(todos).map((group, groupIndex) => {
+      const headingId = group.phase ? `${uid}-${groupIndex}` : undefined;
+      return <React.Fragment key={groupIndex}>
+        {group.phase && <h3 className="todo-phase" id={headingId}>{group.phase}</h3>}
+        {/* Safari drops list semantics when list-style is none. */}
+        <ul className="todo-items" role="list" aria-labelledby={headingId}>{group.todos.map((todo, index) => {
+          const status = todoStatus(todo);
+          const { label, mark, tag } = TODO_STATUS[status];
+          return <li key={index} className={`todo ${status}`}>
+            <Icon className="todo-icon">{mark}</Icon>
+            <span className="todo-body">
+              <span className="todo-content"><span className="sr-only">{label}: </span>{todo.content}</span>
+              {tag && <span className="todo-tag" aria-hidden="true">{label}</span>}
+              {status === 'blocked' && typeof todo.blocker === 'string' && todo.blocker.trim() && <span className="todo-blocker">Blocked: {todo.blocker}</span>}
+            </span>
+          </li>;
+        })}</ul>
+      </React.Fragment>;
+    })}</div>
+  </details>;
+}
+
+const BLANK_ANSWER = { picked: [], other: false, custom: '' };
+const isAnswered = (question, { picked, other, custom }) => (!other || custom.trim() !== '') && (question.multi || picked.length > 0 || other);
+const requestKey = (session, ask) => `${session.processId}\u0000${session.sessionId}\u0000${ask.requestId}`;
+
+// Single choice: a listed option and Other exclude each other. Multi: they combine.
+const pickOption = (question, label, on) => answer => question.multi
+  ? { ...answer, picked: on ? [...answer.picked.filter(item => item !== label), label] : answer.picked.filter(item => item !== label) }
+  : { ...answer, picked: [label], other: false };
+const pickOther = (question, on) => answer => question.multi ? { ...answer, other: on } : { ...answer, picked: [], other: true };
+const typeOther = (question, custom) => answer => ({ ...answer, picked: question.multi ? answer.picked : [], other: true, custom });
+
+function visibleAsk(ask) {
+  if (ask?.requestId == null || ask.requestId === '' || !Array.isArray(ask.questions) || !ask.questions.length) return null;
+  return { ...ask, questions: ask.questions.map(question => ({
+    id: question?.id,
+    header: typeof question?.header === 'string' ? question.header : '',
+    question: String(question?.question ?? ''),
+    multi: question?.multi === true,
+    recommended: Number.isInteger(question?.recommended) ? question.recommended : -1,
+    options: (Array.isArray(question?.options) ? question.options : []).filter(option => typeof option?.label === 'string')
+      .map(option => ({ label: option.label, description: typeof option.description === 'string' ? option.description : '' })),
+  })) };
+}
+
+function buildAnswers(questions, answers) {
+  return questions.map((question, index) => {
+    const { picked, other, custom } = { ...BLANK_ANSWER, ...answers[index] };
+    const selectedOptions = [...new Set(question.options.map(option => option.label))].filter(label => picked.includes(label));
+    const customInput = other ? custom.trim() : '';
+    return customInput ? { id: question.id, selectedOptions, customInput } : { id: question.id, selectedOptions };
+  });
+}
+
+// Keyed by session and request id by the caller, so answers never carry over to another request.
+function AskPanel({ ask, connected, submitting, onSubmit }) {
+  const uid = useId();
+  const [answers, setAnswers] = useState({});
+  const read = index => ({ ...BLANK_ANSWER, ...answers[index] });
+  const change = (index, update) => setAnswers(all => ({ ...all, [index]: update({ ...BLANK_ANSWER, ...all[index] }) }));
+  const count = ask.questions.length;
+  const unanswered = ask.questions.filter((question, index) => !isAnswered(question, read(index))).length;
+  const statusId = `${uid}-status`;
+  function submit(event) {
+    event.preventDefault();
+    if (unanswered || submitting || !connected) return;
+    onSubmit(ask.requestId, buildAnswers(ask.questions, answers));
+  }
+  return <form className="ask" aria-labelledby={`${uid}-title`} aria-busy={submitting} onSubmit={submit}>
+    <div className="ask-title" id={`${uid}-title`}><span className="dot waiting" aria-hidden="true" />Pi needs your input</div>
+    <div className="ask-body">{ask.questions.map((question, index) => {
+      const answer = read(index);
+      const group = `${uid}-${index}`;
+      const type = question.multi ? 'checkbox' : 'radio';
+      return <fieldset key={index} className="ask-question" disabled={submitting}>
+        <legend>
+          {question.header && <span className="ask-header">{question.header}</span>}
+          <span className="ask-text">{question.question}</span>
+          <span className="ask-hint">{question.multi ? 'Select all that apply' : 'Select one'}</span>
+        </legend>
+        <div className="ask-options">
+          {question.options.map((option, optionIndex) => {
+            const id = `${group}-${optionIndex}`;
+            const checked = answer.picked.includes(option.label);
+            return <div key={optionIndex} className={`ask-option${checked ? ' on' : ''}`}>
+              <input id={id} className="ask-pick" type={type} name={group} checked={checked} aria-describedby={option.description ? `${id}-description` : undefined}
+                onChange={event => change(index, pickOption(question, option.label, event.target.checked))} />
+              <label htmlFor={id}>{option.label}{question.recommended === optionIndex && <>{' '}<span className="ask-recommended">recommended</span></>}</label>
+              {option.description && <span id={`${id}-description`} className="ask-description">{option.description}</span>}
+            </div>;
+          })}
+          <div className={`ask-option${answer.other ? ' on' : ''}`}>
+            <input id={`${group}-other`} className="ask-pick" type={type} name={group} checked={answer.other}
+              onChange={event => change(index, pickOther(question, event.target.checked))} />
+            <label htmlFor={`${group}-other`}>Other</label>
+            <input className="ask-custom" type="text" value={answer.custom} aria-label="Other answer" placeholder="Type your own answer" autoComplete="off"
+              onChange={event => change(index, typeOther(question, event.target.value))} />
+          </div>
+        </div>
+      </fieldset>;
+    })}</div>
+    <div className="ask-footer">
+      <span id={statusId} className="ask-status">{submitting ? 'Waiting for Pi…' : !connected ? 'Reconnecting…' : unanswered ? count === 1 ? 'Answer required' : `${unanswered} of ${count} unanswered` : ''}</span>
+      <button type="submit" className="ask-submit" disabled={unanswered > 0 || submitting || !connected} aria-describedby={statusId}>
+        {submitting ? 'Sending…' : count === 1 ? 'Send answer' : 'Send answers'}</button>
+    </div>
+  </form>;
+}
+
 const Back = () => <Icon><path d="m15 18-6-6 6-6" /></Icon>;
 const Check = () => <Icon className="menu-check"><path d="M20 6 9 17l-5-5" /></Icon>;
 
@@ -339,6 +486,8 @@ function App() {
   drawerOpen.current = drawer;
   const [sidebarHidden, setSidebarHidden] = useState(() => localStorage.getItem(SIDEBAR_KEY) === '1');
   const [atBottom, setAtBottom] = useState(true);
+  const followBottom = useRef(true);
+  followBottom.current = atBottom;
   const [editing, setEditing] = useState(null);
   const [query, setQuery] = useState('');
   const [pinned, setPinned] = useState(() => {
@@ -352,6 +501,8 @@ function App() {
   const connectRef = useRef(null);
   const log = useRef(null);
   const input = useRef(null);
+  const askShown = useRef(null);
+  const todoPanel = useRef(null);
   const menu = useRef(null);
   const sidebar = useRef(null);
   const actionsButton = useRef(null);
@@ -363,6 +514,9 @@ function App() {
   const infoDialog = useRef(null);
   const [infoFor, setInfoFor] = useState(null);
   const [settings, setSettings] = useState(loadSettings);
+  // Phones start collapsed so the list does not take over a short screen.
+  const [todosOpen, setTodosOpen] = useState(() => !matchMedia('(max-width: 759px)').matches);
+  const [asked, setAsked] = useState(null);
 
   function publish(next) { data.current = next; setHistory(next); }
   function notify(text, tone = 'success') {
@@ -418,6 +572,12 @@ function App() {
   const renaming = editing !== null && editing === renameKey;
   const notice = !item ? history.sessions.length ? 'Select a session to view its conversation.' : 'No sessions yet. In Pi, run /rc to connect a session.' :
     !socketOpen ? 'Connection lost. Reconnecting to the server…' : !item.online ? 'Offline — showing last saved conversation' : null;
+  // Both panels outlive a dropped socket, so typed answers survive a reconnect; sending is gated on the socket.
+  const todos = item?.online ? visibleTodos(item.todos) : [];
+  const ask = item?.online ? visibleAsk(item.ask) : null;
+  const askId = ask ? requestKey(item, ask) : null;
+  const todosShown = todos.length > 0;
+  const asking = askId !== null && asked === askId;
 
   useEffect(() => {
     const node = log.current;
@@ -434,6 +594,27 @@ function App() {
     node.style.height = `${Math.min(node.scrollHeight, 192)}px`;
   }, [text, signedIn]);
   useEffect(() => setEditing(key => key === renameKey ? key : null), [renameKey]);
+  // Only the answer sent for the request on screen counts as waiting.
+  useEffect(() => setAsked(key => key === askId ? key : null), [askId]);
+  // A new connection may not have received the earlier answer; preserve the draft but allow resubmission.
+  useEffect(() => setAsked(null), [item?.connectionId]);
+  // The answered panel unmounts with focus inside it; hand focus back to the composer on desktop.
+  useEffect(() => {
+    if (askShown.current && !askId && (!document.activeElement || document.activeElement === document.body) && matchMedia('(pointer: fine)').matches) input.current?.focus();
+    askShown.current = askId;
+  }, [askId]);
+  // Panel changes shrink the conversation; keep a reader who was at the bottom there.
+  useLayoutEffect(() => {
+    const node = log.current;
+    if (!node) return;
+    const follow = () => { if (followBottom.current) node.scrollTop = node.scrollHeight; };
+    follow();
+    const panel = todoPanel.current;
+    if (!panel) return;
+    const observer = new ResizeObserver(follow);
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, [askId, todosShown, todosOpen]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60000);
     return () => clearInterval(timer);
@@ -532,7 +713,7 @@ function App() {
       ws.onmessage = event => {
         try {
           const message = JSON.parse(event.data);
-          if (message.type === 'error') { notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
+          if (message.type === 'error') { setAsked(null); notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
           const note = sessionNotice(message, { enabled: notifying.current.inPage && !notifying.current.subscribed && Notification.permission === 'granted',
             hidden: document.hidden, selected: data.current.selected, sessions: data.current.sessions });
           if (message.type === 'sessions' && Number.isFinite(message.now)) clockOffset.current = message.now - Date.now();
@@ -548,6 +729,7 @@ function App() {
       ws.onclose = async () => {
         if (!mounted || socket.current !== ws) return;
         socket.current = null;
+        setAsked(null);
         publish({ ...data.current, stream: null, pending: null, awaiting: true });
         try {
           const response = await fetch('/api/push-key', { cache: 'no-store' });
@@ -609,6 +791,16 @@ function App() {
     if (!usable() || !currentSession(data.current).busy) return;
     const current = currentSession(data.current);
     socket.current.send(JSON.stringify({ type: 'abort', processId: current.processId, sessionId: current.sessionId }));
+  }
+  function answerAsk(requestId, answers) {
+    const current = currentSession(data.current);
+    if (!usable() || current.ask?.requestId !== requestId) return;
+    const encoder = new TextEncoder();
+    if (answers.some(answer => answer.customInput && encoder.encode(answer.customInput).length > 16 * 1024)) { notify('Custom answer exceeds 16 KB', 'error'); return; }
+    const command = JSON.stringify({ type: 'ask_answer', processId: current.processId, sessionId: current.sessionId, requestId, answers });
+    if (encoder.encode(command).length > 64 * 1024) { notify('Answer exceeds the 64 KB message limit', 'error'); return; }
+    socket.current.send(command);
+    setAsked(requestKey(current, current.ask));
   }
   function sendChoice(message, choice) {
     if (!usable()) return;
@@ -720,6 +912,7 @@ function App() {
     ws?.close();
     publish(initialHistory);
     setDrafts({});
+    setAsked(null);
     setDrawer(false);
     setSignedIn(false);
     setStatus('Signed out');
@@ -803,8 +996,9 @@ function App() {
         </div>
       </div>
       <div className="composer-wrap">
+        <div className="sr-only" role="status">{asking ? 'Answer sent. Waiting for Pi.' : ask ? `Pi needs your input: ${ask.questions.length} question${ask.questions.length === 1 ? '' : 's'}` : ''}</div>
         {!atBottom && <button type="button" className="icon-button scroll-bottom" aria-label="Scroll to bottom" onClick={scrollToBottom}><Icon><path d="M12 5v14M19 12l-7 7-7-7" /></Icon></button>}
-        {busy && <Working since={item.busySince} running={toolRunning(items)} offset={clockOffset.current} />}
+        {busy && !ask && <Working since={item.busySince} running={toolRunning(items)} offset={clockOffset.current} />}
         {active && item.background?.length > 0 && <details className="background">
           <summary><span className="dot busy" aria-hidden="true" /><span className="background-summary">{backgroundSummary(item.background)}</span><Chevron /></summary>
           <ul>{item.background.map(job => <li key={`${job.kind}:${job.id}`}><BackgroundJob job={job} now={now} /></li>)}</ul>
@@ -813,6 +1007,8 @@ function App() {
           <div className="queue-label">queued</div>
           <ol aria-label="Queued messages">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
         </div>}
+        {todosShown && <TodoPanel panelRef={todoPanel} todos={todos} open={todosOpen} onToggle={setTodosOpen} />}
+        {ask && <AskPanel key={askId} ask={ask} connected={socketOpen} submitting={asking} onSubmit={answerAsk} />}
         <form id="composer" onSubmit={prompt}><label htmlFor="prompt" className="sr-only">Message</label>
           <textarea id="prompt" ref={input} rows="1" value={text} onChange={event => setText(event.target.value)} onKeyDown={onPromptKey} disabled={!active}
             placeholder={!item ? 'Select a session' : !socketOpen ? 'Reconnecting…' : !item.online ? 'Offline — showing last saved conversation' : busy ? 'Steer the agent ...' : 'Write a message ...'} />
