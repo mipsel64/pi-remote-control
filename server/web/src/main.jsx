@@ -4,6 +4,7 @@ import { buildAsset, choose, contentText, unchoose, currentSession, DEFAULT_NAME
 import { backgroundSummary, buildThread, groupModels, isBashTool, levelLabel, matchModel, messageTime, modelPicker, modelTrigger, relativeTime, splitModelKey, toolRunning, toolStatus, toolSummary, usageSummary, workingLabel } from './parts.js';
 import { Markdown as Text } from './markdown.js';
 import ICON_COLORS from './icon-colors.json';
+import { BLANK_ANSWER, isAnswered, requestKey, visibleAsk, buildAnswers, reconcileDrafts, rejectionMatches, makeAnswerCommand } from './ask.js';
 import '@fontsource-variable/geist-mono';
 import './style.css';
 
@@ -204,10 +205,6 @@ function TodoPanel({ todos, open, onToggle, panelRef }) {
   </details>;
 }
 
-const BLANK_ANSWER = { picked: [], other: false, custom: '' };
-const isAnswered = (question, { picked, other, custom }) => (!other || custom.trim() !== '') && (question.multi || picked.length > 0 || other);
-const requestKey = (session, ask) => `${session.processId}\u0000${session.sessionId}\u0000${ask.requestId}`;
-
 // Single choice: a listed option and Other exclude each other. Multi: they combine.
 const pickOption = (question, label, on) => answer => question.multi
   ? { ...answer, picked: on ? [...answer.picked.filter(item => item !== label), label] : answer.picked.filter(item => item !== label) }
@@ -215,41 +212,20 @@ const pickOption = (question, label, on) => answer => question.multi
 const pickOther = (question, on) => answer => question.multi ? { ...answer, other: on } : { ...answer, picked: [], other: true };
 const typeOther = (question, custom) => answer => ({ ...answer, picked: question.multi ? answer.picked : [], other: true, custom });
 
-function visibleAsk(ask) {
-  if (ask?.requestId == null || ask.requestId === '' || !Array.isArray(ask.questions) || !ask.questions.length) return null;
-  return { ...ask, questions: ask.questions.map(question => ({
-    id: question?.id,
-    header: typeof question?.header === 'string' ? question.header : '',
-    question: String(question?.question ?? ''),
-    multi: question?.multi === true,
-    recommended: Number.isInteger(question?.recommended) ? question.recommended : -1,
-    options: (Array.isArray(question?.options) ? question.options : []).filter(option => typeof option?.label === 'string')
-      .map(option => ({ label: option.label, description: typeof option.description === 'string' ? option.description : '' })),
-  })) };
-}
-
-function buildAnswers(questions, answers) {
-  return questions.map((question, index) => {
-    const { picked, other, custom } = { ...BLANK_ANSWER, ...answers[index] };
-    const selectedOptions = [...new Set(question.options.map(option => option.label))].filter(label => picked.includes(label));
-    const customInput = other ? custom.trim() : '';
-    return customInput ? { id: question.id, selectedOptions, customInput } : { id: question.id, selectedOptions };
-  });
-}
-
 // Keyed by session and request id by the caller, so answers never carry over to another request.
-function AskPanel({ ask, connected, submitting, onSubmit }) {
+function AskPanel({ ask, connected, submitting, error, draft, onDraft, onSubmit }) {
   const uid = useId();
-  const [answers, setAnswers] = useState({});
+  const { answers = {}, globalNote = '' } = draft;
+  const rpiv = ask.kind === 'rpiv';
   const read = index => ({ ...BLANK_ANSWER, ...answers[index] });
-  const change = (index, update) => setAnswers(all => ({ ...all, [index]: update({ ...BLANK_ANSWER, ...all[index] }) }));
+  const change = (index, update) => onDraft(old => ({ ...old, answers: { ...old.answers, [index]: update({ ...BLANK_ANSWER, ...old.answers?.[index] }) } }));
   const count = ask.questions.length;
-  const unanswered = ask.questions.filter((question, index) => !isAnswered(question, read(index))).length;
+  const unanswered = ask.questions.filter((question, index) => !isAnswered(question, read(index), rpiv)).length;
   const statusId = `${uid}-status`;
   function submit(event) {
     event.preventDefault();
     if (unanswered || submitting || !connected) return;
-    onSubmit(ask.requestId, buildAnswers(ask.questions, answers));
+    onSubmit(ask.requestId, { answers: buildAnswers(ask.questions, answers, rpiv), ...(rpiv && globalNote ? { globalNote } : {}) });
   }
   return <form className="ask" aria-labelledby={`${uid}-title`} aria-busy={submitting} onSubmit={submit}>
     <div className="ask-title" id={`${uid}-title`}><span className="dot waiting" aria-hidden="true" />Pi needs your input</div>
@@ -282,10 +258,13 @@ function AskPanel({ ask, connected, submitting, onSubmit }) {
               onChange={event => change(index, typeOther(question, event.target.value))} />
           </div>
         </div>
+        {rpiv && <label>Notes (optional)<textarea className="ask-custom" value={answer.notes || ''} onChange={event => change(index, value => ({ ...value, notes: event.target.value }))} /></label>}
       </fieldset>;
-    })}</div>
+    })}{rpiv && <label>Global note (optional)<textarea className="ask-custom" disabled={submitting} value={globalNote} onChange={event => { const value = event.target.value; onDraft(old => ({ ...old, globalNote: value })); }} /></label>}</div>
+    {error && <div className="ask-status" role="alert">{error}</div>}
     <div className="ask-footer">
       <span id={statusId} className="ask-status">{submitting ? 'Waiting for Pi…' : !connected ? 'Reconnecting…' : unanswered ? count === 1 ? 'Answer required' : `${unanswered} of ${count} unanswered` : ''}</span>
+      {rpiv && <button type="button" disabled={submitting || !connected} onClick={() => onSubmit(ask.requestId, { cancel: true, ...(globalNote ? { globalNote } : {}) })}>Cancel request</button>}
       <button type="submit" className="ask-submit" disabled={unanswered > 0 || submitting || !connected} aria-describedby={statusId}>
         {submitting ? 'Sending…' : count === 1 ? 'Send answer' : 'Send answers'}</button>
     </div>
@@ -516,9 +495,9 @@ function App() {
   const [settings, setSettings] = useState(loadSettings);
   // Phones start collapsed so the list does not take over a short screen.
   const [todosOpen, setTodosOpen] = useState(() => !matchMedia('(max-width: 759px)').matches);
-  const [asked, setAsked] = useState(null);
+  const [askDrafts, setAskDrafts] = useState({});
 
-  function publish(next) { data.current = next; setHistory(next); }
+  function publish(next) { data.current = next; setHistory(next); setAskDrafts(old => reconcileDrafts(old, next.sessions)); }
   function notify(text, tone = 'success') {
     clearTimeout(toastTimer.current);
     setToast({ text, tone, id: Date.now() });
@@ -577,7 +556,9 @@ function App() {
   const ask = item?.online ? visibleAsk(item.ask) : null;
   const askId = ask ? requestKey(item, ask) : null;
   const todosShown = todos.length > 0;
-  const asking = askId !== null && asked === askId;
+  const draft = askDrafts[askId] || {};
+  const asking = Boolean(draft.waiting);
+  const updateDraft = (key, update) => setAskDrafts(old => ({ ...old, [key]: update(old[key] || {}) }));
 
   useEffect(() => {
     const node = log.current;
@@ -594,10 +575,6 @@ function App() {
     node.style.height = `${Math.min(node.scrollHeight, 192)}px`;
   }, [text, signedIn]);
   useEffect(() => setEditing(key => key === renameKey ? key : null), [renameKey]);
-  // Only the answer sent for the request on screen counts as waiting.
-  useEffect(() => setAsked(key => key === askId ? key : null), [askId]);
-  // A new connection may not have received the earlier answer; preserve the draft but allow resubmission.
-  useEffect(() => setAsked(null), [item?.connectionId]);
   // The answered panel unmounts with focus inside it; hand focus back to the composer on desktop.
   useEffect(() => {
     if (askShown.current && !askId && (!document.activeElement || document.activeElement === document.body) && matchMedia('(pointer: fine)').matches) input.current?.focus();
@@ -713,11 +690,22 @@ function App() {
       ws.onmessage = event => {
         try {
           const message = JSON.parse(event.data);
-          if (message.type === 'error') { setAsked(null); notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
+          if (message.type === 'event' && message.event?.type === 'ask_rejected') {
+            setAskDrafts(old => Object.fromEntries(Object.entries(old).map(([key, draft]) => {
+              if (!rejectionMatches(draft.waiting, message)) return [key, draft];
+              const code = message.event.code;
+              return [key, { ...draft, waiting: null, error: code === 'busy' ? 'Pi is busy. Retry after 30 seconds if needed.' : `Answer rejected: ${code}` }];
+            })));
+            return;
+          }
+          if (message.type === 'error') { setAskDrafts(old => Object.fromEntries(Object.entries(old).map(([key, draft]) => [key, draft.waiting && !draft.waiting.attemptId ? { ...draft, waiting: null } : draft]))); notify(message.message || 'Command failed', 'error'); publish({ ...data.current, optimistic: {} }); return; }
           const note = sessionNotice(message, { enabled: notifying.current.inPage && !notifying.current.subscribed && Notification.permission === 'granted',
             hidden: document.hidden, selected: data.current.selected, sessions: data.current.sessions });
           if (message.type === 'sessions' && Number.isFinite(message.now)) clockOffset.current = message.now - Date.now();
           const result = receive(data.current, message);
+          if (message.type === 'event' && message.event?.type === 'ask_update') {
+            result.state = { ...result.state, sessions: result.state.sessions.map(session => session.processId === message.processId && session.sessionId === message.sessionId ? { ...session, ask: message.event.ask, askWarning: message.event.askWarning } : session) };
+          }
           publish(result.state);
           if (wanted.current && openSession(wanted.current)) {
             wanted.current = null;
@@ -729,7 +717,7 @@ function App() {
       ws.onclose = async () => {
         if (!mounted || socket.current !== ws) return;
         socket.current = null;
-        setAsked(null);
+        setAskDrafts(old => Object.fromEntries(Object.entries(old).map(([key, draft]) => [key, { ...draft, waiting: null }])));
         publish({ ...data.current, stream: null, pending: null, awaiting: true });
         try {
           const response = await fetch('/api/push-key', { cache: 'no-store' });
@@ -792,15 +780,17 @@ function App() {
     const current = currentSession(data.current);
     socket.current.send(JSON.stringify({ type: 'abort', processId: current.processId, sessionId: current.sessionId }));
   }
-  function answerAsk(requestId, answers) {
+  function answerAsk(requestId, payload) {
     const current = currentSession(data.current);
     if (!usable() || current.ask?.requestId !== requestId) return;
-    const encoder = new TextEncoder();
-    if (answers.some(answer => answer.customInput && encoder.encode(answer.customInput).length > 16 * 1024)) { notify('Custom answer exceeds 16 KB', 'error'); return; }
-    const command = JSON.stringify({ type: 'ask_answer', processId: current.processId, sessionId: current.sessionId, requestId, answers });
-    if (encoder.encode(command).length > 64 * 1024) { notify('Answer exceeds the 64 KB message limit', 'error'); return; }
+    const rpiv = current.ask.kind === 'rpiv';
+    const key = requestKey(current, current.ask);
+    let attemptId;
+    if (rpiv) do { attemptId = crypto.randomUUID(); } while (attemptId === requestId);
+    const { command, error } = makeAnswerCommand(current, requestId, attemptId, payload);
+    if (error) { updateDraft(key, draft => ({ ...draft, error })); return; }
     socket.current.send(command);
-    setAsked(requestKey(current, current.ask));
+    updateDraft(key, draft => ({ ...draft, error: '', waiting: { processId: current.processId, sessionId: current.sessionId, requestId, attemptId, connectionId: current.connectionId } }));
   }
   function sendChoice(message, choice) {
     if (!usable()) return;
@@ -912,7 +902,7 @@ function App() {
     ws?.close();
     publish(initialHistory);
     setDrafts({});
-    setAsked(null);
+    setAskDrafts({});
     setDrawer(false);
     setSignedIn(false);
     setStatus('Signed out');
@@ -996,7 +986,7 @@ function App() {
         </div>
       </div>
       <div className="composer-wrap">
-        <div className="sr-only" role="status">{asking ? 'Answer sent. Waiting for Pi.' : ask ? `Pi needs your input: ${ask.questions.length} question${ask.questions.length === 1 ? '' : 's'}` : ''}</div>
+        <div className="sr-only" role="status">{asking ? 'Answer sent. Waiting for Pi.' : ask?.kind === 'terminal_only' ? 'Pi needs input in the terminal.' : ask ? `Pi needs your input: ${ask.questions.length} question${ask.questions.length === 1 ? '' : 's'}` : ''}</div>
         {!atBottom && <button type="button" className="icon-button scroll-bottom" aria-label="Scroll to bottom" onClick={scrollToBottom}><Icon><path d="M12 5v14M19 12l-7 7-7-7" /></Icon></button>}
         {busy && !ask && <Working since={item.busySince} running={toolRunning(items)} offset={clockOffset.current} />}
         {active && item.background?.length > 0 && <details className="background">
@@ -1008,7 +998,8 @@ function App() {
           <ol aria-label="Queued messages">{item.queued.map((queued, index) => <li key={index} title={queued}>{queued}</li>)}</ol>
         </div>}
         {todosShown && <TodoPanel panelRef={todoPanel} todos={todos} open={todosOpen} onToggle={setTodosOpen} />}
-        {ask && <AskPanel key={askId} ask={ask} connected={socketOpen} submitting={asking} onSubmit={answerAsk} />}
+        {item?.askWarning && <p className="notice" role="alert">Some requests could not be tracked. Check the terminal.</p>}
+        {ask?.kind === 'terminal_only' ? <p className="notice" role="status">Answer this request in the terminal ({ask.reason}).</p> : ask && <AskPanel key={askId} ask={ask} connected={socketOpen} submitting={asking} error={draft.error || ''} draft={draft} onDraft={update => updateDraft(askId, update)} onSubmit={answerAsk} />}
         <form id="composer" onSubmit={prompt}><label htmlFor="prompt" className="sr-only">Message</label>
           <textarea id="prompt" ref={input} rows="1" value={text} onChange={event => setText(event.target.value)} onKeyDown={onPromptKey} disabled={!active}
             placeholder={!item ? 'Select a session' : !socketOpen ? 'Reconnecting…' : !item.online ? 'Offline — showing last saved conversation' : busy ? 'Steer the agent ...' : 'Write a message ...'} />
