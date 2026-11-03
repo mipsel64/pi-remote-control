@@ -1071,7 +1071,6 @@ fn todos_and_ask_are_validated_bounded_and_replaced_by_hello() {
     let info = || app.inner.lock().unwrap().sessions["p"].info("p");
     // Browsers get sanitized state and, for a new ask, a sanitized in-page notification event.
     let mut update = |event: Value| {
-        let had_ask = !info()["ask"].is_null();
         let is_ask = event["type"] == "ask_update";
         assert!(agent_message(
             &app,
@@ -1084,12 +1083,12 @@ fn todos_and_ask_are_validated_bounded_and_replaced_by_hello() {
             serde_json::from_str(browser.try_recv().unwrap().to_text().unwrap()).unwrap();
         assert_eq!(frame["type"], "sessions");
         let ask = frame["sessions"][0]["ask"].clone();
-        if is_ask && !had_ask && !ask.is_null() {
+        if is_ask {
             let notification: Value =
                 serde_json::from_str(browser.try_recv().unwrap().to_text().unwrap()).unwrap();
             assert_eq!(
                 notification,
-                json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":ask}})
+                json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":ask,"askWarning":false}})
             );
         }
         assert!(browser.try_recv().is_err());
@@ -2012,4 +2011,336 @@ fn loopback_origin_port_check_only_applies_to_loopback_binds() {
         &Url::parse("https://pi.tail.example").unwrap(),
         8787
     ));
+}
+
+#[test]
+fn rpiv_protocol_normalization_and_answers() {
+    let input = json!({"kind":"rpiv","requestId":"r","questions":[
+        {"id":"q","question":"Why?","header":"H","multi":false,"options":[{"label":"A","description":"detail"}],"recommended":0},
+        {"id":"m","question":"More?","multi":true,"options":[{"label":"B"}]}
+    ]});
+    let ask = ask_value(&input).unwrap();
+    assert_eq!(ask, input);
+    let command = json!({"type":"ask_answer","processId":"p","sessionId":"s","requestId":"r","attemptId":"a", "answers":[
+        {"id":"m","selectedOptions":["B"],"customInput":"extra","notes":""},
+        {"id":"q","selectedOptions":["A"]}],"globalNote":"note"});
+    let mut expected = command.clone();
+    expected.as_object_mut().unwrap().remove("processId");
+    assert_eq!(ask_answer(Some(&ask), "s", &command), Some(expected));
+    for change in [
+        json!({"attemptId":"r"}),
+        json!({"attemptId":""}),
+        json!({"globalNote":null}),
+        json!({"globalNote":"é".repeat(8193)}),
+        json!({"cancel":true}),
+        json!({"answers":[{"id":"q","selectedOptions":["A"]}]}),
+        json!({"answers":[{"id":"q","selectedOptions":["A"],"customInput":"x"},{"id":"m","selectedOptions":["B"]}]}),
+        json!({"answers":[{"id":"q","selectedOptions":[],"customInput":"  "},{"id":"m","selectedOptions":["B"]}]}),
+        json!({"answers":[{"id":"q","selectedOptions":["A"]},{"id":"m","selectedOptions":["B","B"]}]}),
+        json!({"answers":[{"id":"q","selectedOptions":["A"]},{"id":"m","selectedOptions":["B"],"notes":null}]}),
+        json!({"junk":"x".repeat(65536)}),
+    ] {
+        let mut bad = command.clone();
+        bad.as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        assert!(ask_answer(Some(&ask), "s", &bad).is_none(), "{change}");
+    }
+    let cancel = json!({"requestId":"r","attemptId":"a","cancel":true,"globalNote":""});
+    assert_eq!(
+        ask_answer(Some(&ask), "s", &cancel),
+        Some(
+            json!({"type":"ask_answer","sessionId":"s","requestId":"r","attemptId":"a","cancel":true,"globalNote":""})
+        )
+    );
+    let mut invalid_stored = ask.clone();
+    invalid_stored["questions"][0]["multi"] = json!("yes");
+    assert!(ask_answer(Some(&invalid_stored), "s", &command).is_none());
+    for (key, value) in [
+        ("header", json!(null)),
+        ("recommended", json!(1)),
+        ("multi", json!(null)),
+    ] {
+        let mut bad = input.clone();
+        bad["questions"][0][key] = value;
+        assert!(ask_value(&bad).is_none());
+    }
+    let mut bad = input.clone();
+    bad["questions"][0]["options"][0]["description"] = json!("x".repeat(1025));
+    assert!(ask_value(&bad).is_none());
+    let notice = json!({"kind":"terminal_only","requestId":"r","reason":"preview"});
+    assert_eq!(ask_value(&notice), Some(notice.clone()));
+    assert!(ask_answer(Some(&notice), "s", &command).is_none());
+    assert!(ask_value(&json!({"kind":"unknown","requestId":"r"})).is_none());
+    assert!(ask_value(
+        &json!({"kind":"terminal_only","requestId":"r","reason":"preview","questions":[]})
+    )
+    .is_none());
+}
+
+#[test]
+fn rpiv_attempts_are_private_bounded_and_invalidated() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(dir.path()));
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel();
+    let id = Uuid::new_v4();
+    let mut process = None;
+    let ask = json!({"kind":"rpiv","requestId":"r","questions":[{"id":"q","question":"Pick?","multi":false,"options":[{"label":"A"}]}]});
+    assert!(agent_message(
+        &app,
+        id,
+        &agent_tx,
+        &mut process,
+        &json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/","busy":false,"ask":ask,"askWarning":true})
+    ));
+    let _ = agent_rx.try_recv();
+    let (a, mut arx) = mpsc::unbounded_channel();
+    let (b, mut brx) = mpsc::unbounded_channel();
+    {
+        let mut inner = app.inner.lock().unwrap();
+        inner
+            .browsers
+            .insert(Uuid::new_v4(), (String::new(), a.clone()));
+        inner
+            .browsers
+            .insert(Uuid::new_v4(), (String::new(), b.clone()));
+        assert_eq!(inner.sessions["p"].info("p")["askWarning"], true);
+    }
+    let cmd = |attempt: String| json!({"type":"ask_answer","processId":"p","sessionId":"s","requestId":"r","attemptId":attempt,"answers":[{"id":"q","selectedOptions":["A"]}]});
+    browser_message(&app, &a, &cmd("a".into()));
+    assert_eq!(
+        serde_json::from_str::<Value>(agent_rx.try_recv().unwrap().to_text().unwrap()).unwrap()
+            ["attemptId"],
+        "a"
+    );
+    let rejected = |attempt: &str, code: &str| json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_rejected","requestId":"r","attemptId":attempt,"code":code}});
+    assert!(agent_message(
+        &app,
+        id,
+        &agent_tx,
+        &mut process,
+        &rejected("a", "bogus")
+    ));
+    assert!(arx.try_recv().is_err());
+    assert!(agent_message(
+        &app,
+        id,
+        &agent_tx,
+        &mut process,
+        &rejected("a", "busy")
+    ));
+    assert_eq!(
+        serde_json::from_str::<Value>(arx.try_recv().unwrap().to_text().unwrap()).unwrap(),
+        rejected("a", "busy")
+    );
+    assert!(brx.try_recv().is_err());
+    browser_message(&app, &b, &cmd("a".into()));
+    assert_eq!(
+        serde_json::from_str::<Value>(brx.try_recv().unwrap().to_text().unwrap()).unwrap()["event"]
+            ["code"],
+        "busy"
+    );
+    for i in 0..32 {
+        browser_message(&app, &a, &cmd(format!("x{i}")));
+    }
+    browser_message(&app, &b, &cmd("overflow".into()));
+    assert_eq!(
+        serde_json::from_str::<Value>(brx.try_recv().unwrap().to_text().unwrap()).unwrap()["event"]
+            ["code"],
+        "busy"
+    );
+    assert!(agent_message(
+        &app,
+        id,
+        &agent_tx,
+        &mut process,
+        &json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_update","ask":null,"askWarning":false}})
+    ));
+    assert!(app.inner.lock().unwrap().sessions["p"].attempts.is_empty());
+    assert_eq!(app.inner.lock().unwrap().sessions["p"].ask_warning, true);
+    while arx.try_recv().is_ok() {}
+    while brx.try_recv().is_ok() {}
+    assert!(agent_message(
+        &app,
+        id,
+        &agent_tx,
+        &mut process,
+        &rejected("x0", "busy")
+    ));
+    assert!(arx.try_recv().is_err() && brx.try_recv().is_err());
+    {
+        let mut inner = app.inner.lock().unwrap();
+        let session = inner.sessions.get_mut("p").unwrap();
+        session.ask = Some(ask);
+        session.seen_attempts = (0..4096).map(|i| format!("used{i}")).collect();
+    }
+    browser_message(&app, &b, &cmd("fresh".into()));
+    assert_eq!(
+        serde_json::from_str::<Value>(brx.try_recv().unwrap().to_text().unwrap()).unwrap()["event"]
+            ["code"],
+        "busy"
+    );
+    browser_message(
+        &app,
+        &b,
+        &json!({"type":"ask_answer","processId":"p","sessionId":"other","requestId":"r","attemptId":"z","cancel":true}),
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(brx.try_recv().unwrap().to_text().unwrap()).unwrap()["event"]
+            ["code"],
+        "not_found"
+    );
+}
+
+#[tokio::test]
+async fn rpiv_websocket_rejection_is_private() {
+    let (url, task) = fixture().await;
+    let login = Client::new()
+        .post(format!("{url}/api/login"))
+        .header("Origin", "http://127.0.0.1:8787")
+        .json(&json!({"password":"admin-test"}))
+        .send()
+        .await
+        .unwrap();
+    let cookie = login
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let ws = url.replace("http", "ws");
+    let mut req = format!("{ws}/ui").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Origin", "http://127.0.0.1:8787".parse().unwrap());
+    req.headers_mut().insert("Cookie", cookie.parse().unwrap());
+    let (mut a, _) = connect_async(req.clone()).await.unwrap();
+    let (mut b, _) = connect_async(req).await.unwrap();
+    next(&mut a).await;
+    next(&mut b).await;
+    let mut req = format!("{ws}/agent").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Authorization", "Bearer agent-test".parse().unwrap());
+    let (mut agent, _) = connect_async(req).await.unwrap();
+    let ask = json!({"kind":"rpiv","requestId":"r","questions":[{"id":"q","question":"Pick?","multi":false,"options":[{"label":"A"}]}]});
+    agent.send(WsMessage::Text(json!({"type":"hello","processId":"p","sessionId":"s","name":"Pi","cwd":"/","busy":false,"ask":ask,"askWarning":true}).to_string().into())).await.unwrap();
+    next(&mut agent).await;
+    assert_eq!(next(&mut a).await["sessions"][0]["askWarning"], true);
+    next(&mut b).await;
+    a.send(WsMessage::Text(json!({"type":"ask_answer","processId":"p","sessionId":"s","requestId":"r","attemptId":"a","answers":[{"id":"q","selectedOptions":["A"]}]}).to_string().into())).await.unwrap();
+    assert_eq!(next(&mut agent).await["attemptId"], "a");
+    let rejection = json!({"type":"event","processId":"p","sessionId":"s","event":{"type":"ask_rejected","requestId":"r","attemptId":"a","code":"invalid_answer"}});
+    agent
+        .send(WsMessage::Text(rejection.to_string().into()))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut a).await, rejection);
+    assert!(tokio::time::timeout(Duration::from_millis(100), b.next())
+        .await
+        .is_err());
+    agent.close(None).await.unwrap();
+    assert_eq!(next(&mut a).await["sessions"][0]["online"], false);
+    next(&mut b).await;
+    let mut req = format!("{ws}/agent").into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Authorization", "Bearer agent-test".parse().unwrap());
+    let (mut replacement, _) = connect_async(req).await.unwrap();
+    replacement.send(WsMessage::Text(json!({"type":"hello","processId":"p2","sessionId":"s","name":"Pi","cwd":"/","busy":false,"ask":ask,"askWarning":false}).to_string().into())).await.unwrap();
+    next(&mut replacement).await;
+    assert_eq!(next(&mut a).await["sessions"][0]["askWarning"], true);
+    next(&mut b).await;
+    a.send(WsMessage::Text(json!({"type":"ask_answer","processId":"p2","sessionId":"s","requestId":"r","attemptId":"a","cancel":true}).to_string().into())).await.unwrap();
+    assert_eq!(next(&mut a).await["event"]["code"], "busy");
+    replacement
+        .send(WsMessage::Text(
+            json!({"type":"event","processId":"p2","sessionId":"s","event":{"type":"rc_close"}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let cleared = next(&mut a).await;
+    assert_eq!(cleared["sessions"][0]["askWarning"], false);
+    assert!(cleared["sessions"][0]["ask"].is_null());
+    assert_eq!(
+        next(&mut a).await["event"],
+        json!({"type":"ask_update","ask":null,"askWarning":false})
+    );
+    task.abort();
+}
+
+#[test]
+fn rpiv_handoff_and_authenticated_close_preserve_lifetime_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = App::new(state_settings(dir.path()));
+    let ask = json!({"kind":"rpiv","requestId":"r","questions":[{"id":"q","question":"Pick?","multi":false,"options":[{"label":"A"}]}]});
+    let (old_id, old_tx) = attach(&app, "old", "s", 0);
+    {
+        let mut inner = app.inner.lock().unwrap();
+        let old = inner.sessions.get_mut("old").unwrap();
+        old.ask_warning = true;
+        old.seen_attempts = (0..4096).map(|i| format!("used{i}")).collect();
+    }
+    go_offline(&app, "old");
+    let (new_tx, _) = mpsc::unbounded_channel();
+    let new_id = Uuid::new_v4();
+    let mut process = None;
+    let hello = |p: &str, s: &str| json!({"type":"hello","processId":p,"sessionId":s,"name":"Pi","cwd":"/","busy":false,"ask":ask,"askWarning":false});
+    assert!(agent_message(
+        &app,
+        new_id,
+        &new_tx,
+        &mut process,
+        &hello("new", "s")
+    ));
+    {
+        let inner = app.inner.lock().unwrap();
+        assert!(!inner.sessions.contains_key("old"));
+        assert!(inner.sessions["new"].ask_warning);
+        assert_eq!(inner.sessions["new"].seen_attempts.len(), 4096);
+    }
+    let (browser, mut rx) = mpsc::unbounded_channel();
+    browser_message(
+        &app,
+        &browser,
+        &json!({"type":"ask_answer","processId":"new","sessionId":"s","requestId":"r","attemptId":"fresh","cancel":true}),
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(rx.try_recv().unwrap().to_text().unwrap()).unwrap()["event"]
+            ["code"],
+        "busy"
+    );
+    let close =
+        json!({"type":"event","processId":"new","sessionId":"s","event":{"type":"rc_close"}});
+    assert!(agent_message(
+        &app,
+        old_id,
+        &old_tx,
+        &mut Some("new".into()),
+        &close
+    ));
+    assert!(app.inner.lock().unwrap().sessions["new"].ask_warning);
+    let mut wrong = close.clone();
+    wrong["sessionId"] = json!("other");
+    assert!(agent_message(&app, new_id, &new_tx, &mut process, &wrong));
+    assert!(app.inner.lock().unwrap().sessions["new"].ask_warning);
+    assert!(agent_message(&app, new_id, &new_tx, &mut process, &close));
+    {
+        let inner = app.inner.lock().unwrap();
+        let session = &inner.sessions["new"];
+        assert!(!session.ask_warning && session.ask.is_none() && session.attempts.is_empty());
+        assert_eq!(session.seen_attempts.len(), 4096);
+    }
+    assert!(agent_message(
+        &app,
+        new_id,
+        &new_tx,
+        &mut process,
+        &hello("new", "different")
+    ));
+    let inner = app.inner.lock().unwrap();
+    assert!(!inner.sessions["new"].ask_warning);
+    assert!(inner.sessions["new"].seen_attempts.is_empty());
 }
