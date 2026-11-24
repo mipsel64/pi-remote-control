@@ -249,6 +249,83 @@ type AskResult = AskAnswer & { id: string; question: string; options: string[]; 
 type AskEntry = { requestId: string; questions: AskQuestion[]; local: AbortController; answers?: AskAnswer[]; answered: Promise<void>; resolve: () => void };
 type InvokeTool = (params: Fields, options?: { signal?: AbortSignal; onUpdate?: unknown }) => Promise<unknown>;
 
+type RpivQuestion = { id: string; question: string; header?: string; options: { label: string; description?: string }[]; multi: boolean };
+type RpivPrompt = { kind: 'rpiv'; requestId: string; questions: RpivQuestion[] };
+type RpivTerminal = { kind: 'terminal_only'; requestId: string; reason: 'preview' | 'oversize' | 'malformed' | 'unsupported_host' };
+type RpivNativeAnswer = { questionIndex: number; optionIndexes?: number[]; text?: string; notes?: string };
+const rpivId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256;
+
+// IDs are supplied by the caller and remain associated with their original array positions.
+export function normalizeRpivPrompt(payload: unknown, requestId: string, questionIds: string[]): RpivPrompt | RpivTerminal | undefined {
+  if (!rpivId(requestId)) return undefined;
+  const terminal = (reason: RpivTerminal['reason']): RpivTerminal => ({ kind: 'terminal_only', requestId, reason });
+  const event = record(payload);
+  const list = event?.questions;
+  if (!rpivId(event?.toolCallId) || !Array.isArray(list) || !list.length || !Array.isArray(questionIds) || questionIds.length !== list.length
+    || questionIds.some(id => !rpivId(id)) || new Set(questionIds).size !== questionIds.length) return terminal('malformed');
+  if (list.length > MAX_ASK_QUESTIONS) return terminal('oversize');
+  const questions: RpivQuestion[] = [];
+  for (const raw of list) {
+    const q = record(raw);
+    if (!q || typeof q.question !== 'string' || !q.question.trim() || typeof q.header !== 'string'
+      || typeof q.multiSelect !== 'boolean' || !Array.isArray(q.options)) return terminal('malformed');
+    if (q.question.length > 1024 || q.header.length > 256 || q.options.length > MAX_ASK_OPTIONS) return terminal('oversize');
+    const options: RpivQuestion['options'] = [];
+    for (const item of q.options) {
+      const option = record(item);
+      if (!option || typeof option.label !== 'string' || !option.label.trim() || typeof option.description !== 'string'
+        || typeof option.hasPreview !== 'boolean' || options.some(known => known.label === option.label)) return terminal('malformed');
+      if (option.hasPreview) return terminal('preview');
+      if (option.label.length > 256 || option.description.length > 1024) return terminal('oversize');
+      options.push({ label: option.label, ...(option.description ? { description: option.description } : {}) });
+    }
+    questions.push({ id: questionIds[questions.length], question: q.question, ...(q.header ? { header: q.header } : {}), options, multi: q.multiSelect });
+  }
+  const prompt: RpivPrompt = { kind: 'rpiv', requestId, questions };
+  return Buffer.byteLength(JSON.stringify(prompt), 'utf8') > 65536 ? terminal('oversize') : prompt;
+}
+
+// The forwarded command omits processId; restore it to enforce the complete browser envelope limit.
+export function mapRpivAnswer(prompt: RpivPrompt, command: unknown, processId: string, toolCallId: string, nativeRequestId: string):
+  { ok: true; payload: { toolCallId: string; requestId: string; answers?: RpivNativeAnswer[]; cancel?: boolean; globalNote?: string } }
+  | { ok: false; code: 'invalid_payload' | 'invalid_answer' } {
+  const invalidPayload = { ok: false, code: 'invalid_payload' } as const;
+  const invalidAnswer = { ok: false, code: 'invalid_answer' } as const;
+  const input = record(command);
+  if (!input || !rpivId(processId) || !rpivId(toolCallId) || !rpivId(nativeRequestId)
+    || !rpivId(input.requestId) || !rpivId(input.attemptId) || input.requestId !== prompt.requestId
+    || input.attemptId === input.requestId || nativeRequestId === input.requestId || nativeRequestId === input.attemptId) return invalidPayload;
+  try { if (Buffer.byteLength(JSON.stringify({ ...input, processId })) > 65536) return invalidPayload; } catch { return invalidPayload; }
+  const validText = (value: unknown) => typeof value === 'string' && Buffer.byteLength(value) <= MAX_ASK_INPUT;
+  if ((input.cancel !== undefined && typeof input.cancel !== 'boolean') || (input.globalNote !== undefined && !validText(input.globalNote))) return invalidPayload;
+  const base = { toolCallId, requestId: nativeRequestId, ...(input.globalNote !== undefined ? { globalNote: input.globalNote as string } : {}) };
+  if (input.cancel === true) {
+    if (input.answers !== undefined && (!Array.isArray(input.answers) || input.answers.length)) return invalidPayload;
+    return { ok: true, payload: { ...base, cancel: true } };
+  }
+  if (!Array.isArray(input.answers)) return invalidPayload;
+  const mapped = new Map<number, RpivNativeAnswer>();
+  for (const raw of input.answers) {
+    const answer = record(raw);
+    if (!answer || typeof answer.id !== 'string' || !Array.isArray(answer.selectedOptions)
+      || !answer.selectedOptions.every((label: unknown) => typeof label === 'string')
+      || (answer.customInput !== undefined && !validText(answer.customInput)) || (answer.notes !== undefined && !validText(answer.notes))) return invalidPayload;
+    const index = prompt.questions.findIndex(q => q.id === answer.id);
+    if (index < 0 || mapped.has(index)) return invalidAnswer;
+    const question = prompt.questions[index];
+    const indexes = answer.selectedOptions.map((label: string) => question.options.findIndex(option => option.label === label));
+    if (indexes.some((i: number) => i < 0) || new Set(indexes).size !== indexes.length) return invalidAnswer;
+    const text = answer.customInput as string | undefined;
+    if ((text !== undefined && !text.trim()) || (!indexes.length && text === undefined)
+      || (!question.multi && (indexes.length > 1 || (indexes.length > 0 && text !== undefined)))) return invalidAnswer;
+    indexes.sort((a: number, b: number) => a - b);
+    mapped.set(index, { questionIndex: index, ...(indexes.length ? { optionIndexes: indexes } : {}),
+      ...(text !== undefined ? { text } : {}), ...(answer.notes !== undefined ? { notes: answer.notes as string } : {}) });
+  }
+  if (mapped.size !== prompt.questions.length) return invalidAnswer;
+  return { ok: true, payload: { ...base, answers: [...mapped.values()].sort((a, b) => a.questionIndex - b.questionIndex) } };
+}
+
 // Only asks a browser can answer exactly are offered: the server drops one it cannot hold, and answers must match ids and labels verbatim.
 function askQuestions(params: unknown) {
   const list = record(params)?.questions;
@@ -347,6 +424,9 @@ export default function remoteControl(pi: ExtensionAPI) {
   let socket: WebSocket | undefined;
   // processId of the socket's first hello; the server binds the connection to it.
   let socketProcessId: string | undefined;
+  let activeIdentity: { processId: string; sessionId: string } | undefined;
+  // Reset each activated session after its first hello; no per-session backlog is needed.
+  let activationReset = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let delay = 1000;
   let settings: ReturnType<typeof connectionSettings> | undefined;
@@ -391,6 +471,73 @@ export default function remoteControl(pi: ExtensionAPI) {
   // The one open omp ask a browser can answer. The local dialog stays live; the first answer wins.
   let pendingAsk: AskEntry | undefined;
   let askRegistered = false;
+  let askOrder = 0;
+  let ompOrder = 0;
+  let rpivGeneration = 0;
+  let askWarning = false;
+  type Mirror = { toolCallId: string; ask: RpivPrompt | RpivTerminal; order: number };
+  let mirrors: Mirror[] = [];
+  const attempts = new Map<string, { mirror: Mirror; attemptId: string; generation: number; sessionId: string; processId: string; timer: ReturnType<typeof setTimeout> }>();
+  function deleteAttempt(id: string) {
+    const attempt = attempts.get(id);
+    if (attempt) clearTimeout(attempt.timer);
+    attempts.delete(id);
+  }
+  const visibleAsk = () => pendingAsk && (!mirrors.length || ompOrder < mirrors[0].order) ? askPrompt(pendingAsk) : mirrors[0]?.ask ?? null;
+  function clearMirrors() {
+    rpivGeneration++;
+    mirrors = [];
+    for (const id of attempts.keys()) deleteAttempt(id);
+    askWarning = false;
+  }
+  function removeMirror(mirror: Mirror) {
+    mirrors = mirrors.filter(item => item !== mirror);
+    for (const [id, attempt] of attempts) if (attempt.mirror === mirror) deleteAttempt(id);
+    if (ctx) publishAsk(ctx);
+  }
+  function rejectAttempt(current: ExtensionContext, requestId: string, attemptId: string, code: string) {
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'ask_rejected', requestId, attemptId, code } });
+  }
+  pi.events?.on('rpiv:ask-user:prompt', data => {
+    if (!ctx) return;
+    const event = record(data);
+    if (!rpivId(event?.toolCallId) || mirrors.length >= 32 || mirrors.some(item => item.toolCallId === event.toolCallId)) {
+      askWarning = true;
+      publishAsk(ctx);
+      return;
+    }
+    const list = Array.isArray(event.questions) ? event.questions : [];
+    const requestId = randomUUID();
+    const ask = list.length > MAX_ASK_QUESTIONS ? { kind: 'terminal_only' as const, requestId, reason: 'oversize' as const }
+      : normalizeRpivPrompt(data, requestId, list.map(() => randomUUID()));
+    if (!ask) return;
+    mirrors.push({ toolCallId: event.toolCallId, ask, order: ++askOrder });
+    publishAsk(ctx);
+  });
+  pi.events?.on('rpiv:ask-user:blocked', data => {
+    if (!ctx) return;
+    const event = record(data);
+    if (event?.active !== false) return;
+    const mirror = mirrors.find(item => item.toolCallId === event.toolCallId);
+    if (mirror) removeMirror(mirror);
+  });
+  pi.events?.on('rpiv:ask-user:answer-result', data => {
+    const result = record(data);
+    if (!ctx || !rpivId(result?.requestId)) return;
+    const attempt = attempts.get(result.requestId);
+    if (!attempt || result.toolCallId !== attempt.mirror.toolCallId || attempt.generation !== rpivGeneration
+      || attempt.sessionId !== ctx.sessionManager.getSessionId() || attempt.processId !== entryId(ctx) || !mirrors.includes(attempt.mirror)) return;
+    if (result.ok !== true && result.ok !== false) return;
+    deleteAttempt(result.requestId);
+    if (result.ok === true) { removeMirror(attempt.mirror); return; }
+    const code = ['invalid_answer', 'invalid_payload', 'unsupported_host', 'not_found', 'busy'].includes(String(result.code)) ? String(result.code) : 'invalid_payload';
+    rejectAttempt(ctx, attempt.mirror.ask.requestId, attempt.attemptId, code);
+    if (code === 'not_found') removeMirror(attempt.mirror);
+    else if (code === 'unsupported_host') {
+      attempt.mirror.ask = { kind: 'terminal_only', requestId: attempt.mirror.ask.requestId, reason: 'unsupported_host' };
+      publishAsk(ctx);
+    }
+  });
   // Each kind keeps half the slots when both overflow, so many shells never hide every subagent.
   const background = () => {
     const agentSlots = Math.min(agents.length, Math.max(MAX_BACKGROUND / 2, MAX_BACKGROUND - shells.length));
@@ -551,7 +698,7 @@ export default function remoteControl(pi: ExtensionAPI) {
   }
 
   function publishAsk(current: ExtensionContext) {
-    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'ask_update', ask: askPrompt(pendingAsk) } });
+    send({ type: 'event', processId: entryId(current), sessionId: current.sessionManager.getSessionId(), event: { type: 'ask_update', ask: visibleAsk(), askWarning } });
   }
   // Dismisses the local dialog too; callers that cannot publish (a replaced context) rely on the hello that follows.
   function cancelAsk(current?: ExtensionContext) {
@@ -561,9 +708,31 @@ export default function remoteControl(pi: ExtensionAPI) {
     entry.local.abort();
     if (current) publishAsk(current);
   }
-  function answerAsk(current: ExtensionContext, command: { requestId?: unknown; answers?: unknown }) {
+  function answerAsk(current: ExtensionContext, command: { requestId?: unknown; answers?: unknown; attemptId?: unknown }) {
+    const mirror = mirrors[0];
+    if (mirror && visibleAsk() === mirror.ask && command.requestId === mirror.ask.requestId && rpivId(command.attemptId)) {
+      if (mirror.ask.kind !== 'rpiv') { rejectAttempt(current, mirror.ask.requestId, command.attemptId, 'unsupported_host'); return; }
+      if ([...attempts.values()].some(item => item.mirror === mirror)) { rejectAttempt(current, mirror.ask.requestId, command.attemptId, 'busy'); return; }
+      let nativeId = randomUUID();
+      while (nativeId === command.attemptId || nativeId === command.requestId || attempts.has(nativeId)) nativeId = randomUUID();
+      const mapped = mapRpivAnswer(mirror.ask, command, entryId(current), mirror.toolCallId, nativeId);
+      if (!mapped.ok) { rejectAttempt(current, mirror.ask.requestId, command.attemptId, mapped.code); return; }
+      const attemptId = command.attemptId;
+      const generation = rpivGeneration;
+      const timer = setTimeout(() => {
+        const attempt = attempts.get(nativeId);
+        if (!attempt || attempt.generation !== generation || generation !== rpivGeneration) return;
+        deleteAttempt(nativeId);
+        if (ctx && ctx.sessionManager.getSessionId() === attempt.sessionId && entryId(ctx) === attempt.processId && mirrors.includes(mirror))
+          rejectAttempt(ctx, mirror.ask.requestId, attemptId, 'busy');
+      }, 30_000);
+      timer.unref?.();
+      attempts.set(nativeId, { mirror, attemptId, generation, sessionId: current.sessionManager.getSessionId(), processId: entryId(current), timer });
+      pi.events?.emit('rpiv:ask-user:answer', mapped.payload);
+      return;
+    }
     const entry = pendingAsk;
-    if (!entry || command.requestId !== entry.requestId) return;
+    if (!entry || visibleAsk()?.requestId !== entry.requestId || command.requestId !== entry.requestId) return;
     const answers = askAnswers(entry.questions, command.answers);
     if (!answers) return;
     entry.answers = answers;
@@ -579,6 +748,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     const { promise: answered, resolve } = Promise.withResolvers<void>();
     const entry: AskEntry = { requestId: randomUUID(), questions, local: new AbortController(), answered, resolve };
     pendingAsk = entry;
+    ompOrder = ++askOrder;
     if (ctx) publishAsk(ctx);
     try {
       // The native tool owns the dialog, timeout and result; aborting `local` makes it throw, which a browser answer then discards.
@@ -624,7 +794,15 @@ export default function remoteControl(pi: ExtensionAPI) {
     return !ctx ? 'off' : socket?.readyState === WebSocket.OPEN ? 'connected' : failed ? 'retrying' : 'connecting';
   }
 
+  function resetRemote(identity: { processId: string; sessionId: string }) {
+    if (socket?.readyState === WebSocket.OPEN && socketProcessId === identity.processId)
+      send({ type: 'event', ...identity, event: { type: 'rc_close' } });
+  }
+
   function stop() {
+    if (ctx && activeIdentity) resetRemote(activeIdentity);
+    activeIdentity = undefined;
+    clearMirrors();
     if (ctx) status(ctx, 'off');
     ctx = undefined;
     failed = false;
@@ -695,7 +873,9 @@ export default function remoteControl(pi: ExtensionAPI) {
           current.ui.notify('Remote control not configured; run prc setup on this host or set both PI_RC_URL and PI_RC_AGENT_TOKEN', 'warning');
           return;
         }
+        if (!ctx) activationReset = true;
         ctx = current;
+        activeIdentity = { processId: entryId(current), sessionId: current.sessionManager.getSessionId() };
         mainSession = isMainSession(current);
         registerAsk();
         status(current, connectionState() === 'retrying' ? 'retrying' : 'connecting');
@@ -761,9 +941,17 @@ export default function remoteControl(pi: ExtensionAPI) {
       queued: previews(),
       background: list,
       todos,
-      ask: askPrompt(pendingAsk),
+      ask: visibleAsk(),
+      askWarning,
       thinkingLevel: pi.getThinkingLevel(),
       models: modelList(current) });
+    // Hello establishes the authenticated binding; rc_close resets the relay's sticky state.
+    // Restore the current live mirror immediately afterwards, since rc_close also clears ask.
+    if (activationReset) {
+      send({ type: 'event', processId: socketProcessId, sessionId: current.sessionManager.getSessionId(), event: { type: 'rc_close' } });
+      activationReset = false;
+      if (visibleAsk() || askWarning) publishAsk(current);
+    }
   }
 
   function connect() {
@@ -826,6 +1014,12 @@ export default function remoteControl(pi: ExtensionAPI) {
     stopIdleWatch();
     mainSession = isMainSession(current);
     clearOmp();
+    if (ctx && activeIdentity) resetRemote(activeIdentity);
+    const nextIdentity = { processId: entryId(current), sessionId: current.sessionManager.getSessionId() };
+    if (ctx) {
+      activeIdentity = nextIdentity;
+      activationReset = true;
+    }
     // The server binds each connection to the processId of its first hello, so a different session needs a fresh connection.
     // Drop it before anything below publishes for the new session on the old socket.
     if (socket && socketProcessId !== undefined && socketProcessId !== entryId(current)) dropSocket();
@@ -836,6 +1030,7 @@ export default function remoteControl(pi: ExtensionAPI) {
     stopped = false;
     runSignal = undefined;
     cancelAsk();
+    clearMirrors();
     todos = branchTodos(current.sessionManager.getBranch());
     clearPending(current);
     if (queued.length) restoreQueued(current);

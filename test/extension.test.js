@@ -330,6 +330,7 @@ test('authenticated snapshots, events, session ownership, steering and shutdown'
   const first = await run(pi, ctx);
   const hello = await first.next(msg => msg.type === 'hello');
   assert.equal(hello.sessionId, 's1');
+  assert.equal((await first.next(msg => msg.event?.type === 'rc_close')).sessionId, 's1');
   assert.equal(hello.busy, false);
   assert.equal(hello.name, 'earlier');
   assert.equal(hello.branch, null);
@@ -1423,4 +1424,287 @@ test('Pi ignores omp background channels, and omp subagent sessions never publis
     assert.deepEqual(events('background_update'), []);
     assert.deepEqual((await hello()).background, []);
   }
+});
+
+test('rpiv mapping preserves original question and option indexes and exact text', async () => {
+  const { normalizeRpivPrompt, mapRpivAnswer } = await import('../extensions/remote-control.ts');
+  const option = label => ({ label, description: '', hasPreview: false });
+  const prompt = normalizeRpivPrompt({ toolCallId: 'tool', questions: [
+    { question: ' First? ', header: '', multiSelect: false, options: [option(' A '), option('B')] },
+    { question: 'Second?', header: 'H', multiSelect: true, options: [option('X'), option('Y'), option('Z')] },
+  ] }, 'prompt', ['q1', 'q2']);
+  assert.equal(prompt.kind, 'rpiv');
+  assert.equal(prompt.questions[0].question, ' First? ');
+  assert.deepEqual(prompt.questions[0].options[0], { label: ' A ' });
+  const command = { type: 'ask_answer', sessionId: 'session', requestId: 'prompt', attemptId: 'attempt', globalNote: ' note ', answers: [
+    { id: 'q2', selectedOptions: ['Z', 'X'], customInput: ' extra\r\ntext ', notes: ' n ' },
+    { id: 'q1', selectedOptions: [' A '] },
+  ] };
+  assert.deepEqual(mapRpivAnswer(prompt, command, 'process', 'tool', 'native'), { ok: true, payload: {
+    toolCallId: 'tool', requestId: 'native', globalNote: ' note ', answers: [
+      { questionIndex: 0, optionIndexes: [0] },
+      { questionIndex: 1, optionIndexes: [0, 2], text: ' extra\r\ntext ', notes: ' n ' },
+    ],
+  } });
+  const invalid = answers => mapRpivAnswer(prompt, { ...command, answers }, 'process', 'tool', 'native');
+  for (const answers of [[], [command.answers[0]], [command.answers[0], command.answers[0]],
+    [{ id: 'q1', selectedOptions: ['B'], customInput: 'other' }, command.answers[0]],
+    [{ id: 'q1', selectedOptions: ['B'] }, { id: 'q2', selectedOptions: ['X', 'X'] }],
+    [{ id: 'q1', selectedOptions: ['B'] }, { id: 'q2', selectedOptions: [], customInput: '  ' }]])
+    assert.equal(invalid(answers).code, 'invalid_answer');
+  assert.deepEqual(mapRpivAnswer(prompt, { ...command, answers: [], cancel: true }, 'process', 'tool', 'native'),
+    { ok: true, payload: { toolCallId: 'tool', requestId: 'native', globalNote: ' note ', cancel: true } });
+  assert.equal(mapRpivAnswer(prompt, { ...command, cancel: true }, 'process', 'tool', 'native').code, 'invalid_payload');
+  assert.equal(mapRpivAnswer(prompt, { ...command, globalNote: 'é'.repeat(8193) }, 'process', 'tool', 'native').code, 'invalid_payload');
+  assert.equal(mapRpivAnswer(prompt, { ...command, padding: 'x'.repeat(65536) }, 'process', 'tool', 'native').code, 'invalid_payload');
+});
+
+test('rpiv mapping refuses prompts that cannot be represented faithfully', async () => {
+  const { normalizeRpivPrompt } = await import('../extensions/remote-control.ts');
+  const option = { label: 'A', description: '', hasPreview: false };
+  const question = { question: 'Question?', header: '', multiSelect: false, options: [option] };
+  const reason = (q, ids = ['id']) => normalizeRpivPrompt({ toolCallId: 'tool', questions: [q] }, 'request', ids).reason;
+  assert.equal(reason({ ...question, options: [option, option] }), 'malformed');
+  assert.equal(reason({ ...question, options: [{ ...option, hasPreview: true }] }), 'preview');
+  assert.equal(reason({ ...question, question: 'x'.repeat(1025) }), 'oversize');
+  assert.equal(reason(question, []), 'malformed');
+  assert.equal(normalizeRpivPrompt({ questions: [question] }, 'request', ['id']).reason, 'malformed');
+  assert.equal(reason({ ...question, multiSelect: undefined }), 'malformed');
+  assert.equal(normalizeRpivPrompt({ questions: [question] }, '', ['id']), undefined);
+});
+
+test('rpiv mapping enforces serialized prompt byte boundary without clipping', async () => {
+  const { normalizeRpivPrompt } = await import('../extensions/remote-control.ts');
+  const questions = Array.from({ length: 2 }, (_, index) => ({
+    question: `Question ${index}?`, header: '', multiSelect: false,
+    options: Array.from({ length: 40 }, (_, i) => ({ label: `Option ${i}`, description: 'é' + 'x'.repeat(1023), hasPreview: false })),
+  }));
+  const wire = () => ({ kind: 'rpiv', requestId: 'prompt', questions: questions.map((q, i) => ({
+    id: `q${i}`, question: q.question, options: q.options.map(({ label, description }) => ({ label, description })), multi: false,
+  })) });
+  let excess = Buffer.byteLength(JSON.stringify(wire())) - 65536;
+  for (const q of questions) for (const option of q.options) {
+    const removed = Math.min(excess, option.description.length - 1);
+    option.description = option.description.slice(0, option.description.length - removed);
+    excess -= removed;
+    if (!excess) break;
+  }
+  assert.equal(Buffer.byteLength(JSON.stringify(wire())), 65536);
+  const event = { toolCallId: 'tool', questions };
+  assert.deepEqual(normalizeRpivPrompt(event, 'prompt', ['q0', 'q1']), wire());
+  questions[0].options[0].description += 'x';
+  assert.equal(Buffer.byteLength(JSON.stringify(wire())), 65537);
+  assert.deepEqual(normalizeRpivPrompt(event, 'prompt', ['q0', 'q1']), { kind: 'terminal_only', requestId: 'prompt', reason: 'oversize' });
+});
+
+test('rpiv mapping rejects invalid or stale correlation IDs even for cancellation', async () => {
+  const { normalizeRpivPrompt, mapRpivAnswer } = await import('../extensions/remote-control.ts');
+  const prompt = normalizeRpivPrompt({ toolCallId: 'tool', questions: [
+    { question: 'Q?', header: '', multiSelect: false, options: [] },
+  ] }, 'prompt', ['question']);
+  const command = { type: 'ask_answer', requestId: 'prompt', attemptId: 'attempt', cancel: true };
+  const map = (input, tool = 'tool', native = 'native') => mapRpivAnswer(prompt, input, 'process', tool, native);
+  assert.equal(map(command).ok, true);
+  for (const change of [{ requestId: '' }, { requestId: 'stale' }, { requestId: 'x'.repeat(257) },
+    { attemptId: undefined }, { attemptId: '' }, { attemptId: 'x'.repeat(257) }, { attemptId: 'prompt' }])
+    assert.equal(map({ ...command, ...change }).code, 'invalid_payload');
+  for (const [tool, native] of [['', 'native'], ['x'.repeat(257), 'native'], ['tool', ''],
+    ['tool', 'x'.repeat(257)], ['tool', 'prompt'], ['tool', 'attempt']])
+    assert.equal(map(command, tool, native).code, 'invalid_payload');
+});
+
+test('rpiv bridge maps indexed answers and handles immediate rejection, retry and native success', async t => {
+  const { pi, events, until, send, hello } = await attached(t, { piEvents: true });
+  const prompt = { toolCallId: 'native-1', questions: [
+    { question: 'First?', header: '', multiSelect: false, options: [{ label: 'A', description: '', hasPreview: false }] },
+    { question: 'Second?', header: '', multiSelect: true, options: [{ label: 'B', description: '', hasPreview: false }, { label: 'C', description: '', hasPreview: false }] },
+  ] };
+  const emitted = [];
+  pi.events.on('rpiv:ask-user:answer', data => {
+    emitted.push(data);
+    pi.events.emit('rpiv:ask-user:answer-result', { toolCallId: data.toolCallId, requestId: data.requestId, ok: emitted.length > 1, ...(emitted.length === 1 ? { code: 'invalid_answer' } : {}) });
+  });
+  pi.events.emit('rpiv:ask-user:prompt', prompt);
+  await until(() => events('ask_update').length > 0);
+  const ask = (await hello()).ask;
+  const answers = [{ id: ask.questions[1].id, selectedOptions: ['C', 'B'], customInput: 'other', notes: 'note' }, { id: ask.questions[0].id, selectedOptions: ['A'] }];
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'attempt-1', answers, globalNote: 'global' });
+  await until(() => events('ask_rejected').length === 1);
+  assert.deepEqual(events('ask_rejected')[0], { type: 'ask_rejected', requestId: ask.requestId, attemptId: 'attempt-1', code: 'invalid_answer' });
+  assert.deepEqual(emitted[0].answers, [{ questionIndex: 0, optionIndexes: [0] }, { questionIndex: 1, optionIndexes: [0, 1], text: 'other', notes: 'note' }]);
+  assert.equal(emitted[0].globalNote, 'global');
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'attempt-2', cancel: true });
+  await until(() => emitted.length === 2);
+  assert.equal(emitted[1].cancel, true);
+  assert.notEqual(emitted[0].requestId, emitted[1].requestId);
+  assert.equal((await hello()).ask, null);
+  pi.events.emit('rpiv:ask-user:blocked', { toolCallId: 'native-1', active: true });
+  assert.equal((await hello()).ask, null);
+});
+
+test('rpiv FIFO closes queued prompts, guards delayed results and clears on rc close', async t => {
+  const { pi, ctx, events, until, send, hello, messages } = await attached(t, { piEvents: true });
+  const prompt = id => ({ toolCallId: id, questions: [{ question: '?', header: '', multiSelect: false, options: [{ label: 'A', description: '', hasPreview: false }] }] });
+  const native = [];
+  pi.events.on('rpiv:ask-user:answer', data => native.push(data));
+  pi.events.emit('rpiv:ask-user:prompt', prompt('one'));
+  pi.events.emit('rpiv:ask-user:prompt', prompt('two'));
+  pi.events.emit('rpiv:ask-user:blocked', { toolCallId: 'two', active: false });
+  const ask = (await hello()).ask;
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'attempt', answers: [{ id: ask.questions[0].id, selectedOptions: ['A'] }] });
+  await until(() => native.length === 1);
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'attempt-busy', cancel: true });
+  await until(() => events('ask_rejected').length === 1);
+  assert.equal(events('ask_rejected')[0].code, 'busy');
+  pi.events.emit('rpiv:ask-user:blocked', { toolCallId: 'one', active: false });
+  pi.events.emit('rpiv:ask-user:answer-result', { ...native[0], ok: false, code: 'not_found' });
+  assert.equal((await hello()).ask, null);
+  assert.equal(events('ask_rejected').length, 1);
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  assert.equal((await hello()).askWarning, true);
+  pi.command('rc', 'close', ctx);
+  await until(() => messages.some(m => m.event?.type === 'rc_close'));
+});
+
+test('rpiv lost verdict times out with retryable busy and late verdict cannot affect retry', async t => {
+  const { pi, events, until, send, hello } = await attached(t, { piEvents: true });
+  const answers = [];
+  pi.events.on('rpiv:ask-user:answer', payload => answers.push(payload));
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: 'timeout', questions: [{ question: '?', header: '', multiSelect: false, options: [{ label: 'A', description: '', hasPreview: false }] }] });
+  const ask = (await hello()).ask;
+  const realSetTimeout = global.setTimeout;
+  let expire;
+  global.setTimeout = (fn, ms, ...args) => {
+    if (ms === 30_000) expire = fn;
+    return realSetTimeout(fn, ms, ...args);
+  };
+  t.after(() => { global.setTimeout = realSetTimeout; });
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'first', cancel: true });
+  await until(() => answers.length === 1);
+  assert.equal(typeof expire, 'function');
+  global.setTimeout = realSetTimeout;
+  expire();
+  await until(() => events('ask_rejected').some(e => e.attemptId === 'first'));
+  assert.equal(events('ask_rejected').at(-1).code, 'busy');
+  send({ type: 'ask_answer', requestId: ask.requestId, attemptId: 'second', cancel: true });
+  await until(() => answers.length === 2);
+  pi.events.emit('rpiv:ask-user:answer-result', { toolCallId: 'timeout', requestId: answers[0].requestId, ok: true });
+  assert.equal((await hello()).ask.requestId, ask.requestId);
+  pi.events.emit('rpiv:ask-user:answer-result', { toolCallId: 'timeout', requestId: answers[1].requestId, ok: true });
+  assert.equal((await hello()).ask, null);
+});
+
+test('same-session replacement sends authenticated close before fresh hello clears warning', async t => {
+  const { pi, ctx, messages, hello, until } = await attached(t, { piEvents: true });
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  assert.equal((await hello()).askWarning, true);
+  const start = messages.length;
+  pi.emit('session_start', ctx);
+  await until(() => messages.slice(start).some(m => m.type === 'hello'));
+  const frames = messages.slice(start);
+  const close = frames.findIndex(m => m.event?.type === 'rc_close');
+  const fresh = frames.findIndex(m => m.type === 'hello');
+  assert.ok(close >= 0 && close < fresh);
+  assert.equal(frames[close].sessionId, 's1');
+  assert.equal(frames[fresh].askWarning, false);
+});
+
+test('disconnected rc close replays reset after hello and restores new live mirror', async t => {
+  const { pi, ctx, ws, wss, hello, until } = await attached(t, { piEvents: true });
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  assert.equal((await hello()).askWarning, true);
+  ws.terminate();
+  await once(ws, 'close');
+  await delay(30);
+  pi.command('rc', 'close', ctx);
+  const connected = once(wss, 'connection');
+  pi.command('rc', '', ctx);
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: 'new', questions: [{ question: '?', header: '', multiSelect: false, options: [{ label: 'A', description: '', hasPreview: false }] }] });
+  const [next] = await connected;
+  const frames = [];
+  next.on('message', raw => frames.push(JSON.parse(raw.toString())));
+  await until(() => frames.some(m => m.event?.type === 'ask_update'));
+  const h = frames.findIndex(m => m.type === 'hello');
+  const c = frames.findIndex(m => m.event?.type === 'rc_close');
+  const u = frames.findIndex((m, i) => i > c && m.event?.type === 'ask_update');
+  assert.ok(h >= 0 && c > h && u > c);
+  assert.equal(frames[c].sessionId, frames[h].sessionId);
+  assert.equal(frames[c].processId, frames[h].processId);
+  assert.equal(frames[u].event.ask.kind, 'rpiv');
+  assert.equal(frames[u].event.askWarning, false);
+});
+
+test('offline A switched to B then back to A resets stale warning and preserves current live state', async t => {
+  const { pi, ctx, ws, wss, until, hello } = await attached(t, { omp: true });
+  const a = ctx.state.id;
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  assert.equal((await hello()).askWarning, true);
+  // Model the relay's sticky warning: hello and ask_update OR the previous value.
+  let relayWarning = true;
+  ws.terminate();
+  await once(ws, 'close');
+  await delay(30);
+  ctx.state.id = 's2';
+  const bConnected = once(wss, 'connection');
+  pi.emit('session_switch', ctx);
+  const [b] = await bConnected;
+  const bFrames = [];
+  b.on('message', raw => bFrames.push(JSON.parse(raw.toString())));
+  await until(() => bFrames.some(m => m.event?.type === 'rc_close'));
+  ctx.state.id = a;
+  const aConnected = once(wss, 'connection');
+  pi.emit('session_switch', ctx);
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: 'new-a', questions: [{ question: '?', header: '', multiSelect: false, options: [{ label: 'A', description: '', hasPreview: false }] }] });
+  const [again] = await aConnected;
+  const frames = [];
+  again.on('message', raw => frames.push(JSON.parse(raw.toString())));
+  await until(() => frames.some(m => m.event?.type === 'ask_update'));
+  const h = frames.findIndex(m => m.type === 'hello');
+  const c = frames.findIndex(m => m.event?.type === 'rc_close');
+  const u = frames.findIndex((m, i) => i > c && m.event?.type === 'ask_update');
+  assert.ok(h >= 0 && c > h && u > c);
+  assert.equal(frames[h].sessionId, a);
+  assert.equal(frames[c].processId, frames[h].processId);
+  for (const frame of frames) {
+    if (frame.type === 'hello') relayWarning ||= frame.askWarning;
+    if (frame.event?.type === 'rc_close') relayWarning = false;
+    if (frame.event?.type === 'ask_update') relayWarning ||= frame.event.askWarning;
+  }
+  assert.equal(relayWarning, false);
+  assert.equal(frames[u].event.ask.kind, 'rpiv');
+  assert.equal(frames[u].event.askWarning, false);
+
+  // Ordinary socket loss is not a lifecycle reset: retain warning and ask.
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  await until(() => frames.some(m => m.event?.type === 'ask_update' && m.event.askWarning));
+  again.terminate();
+  await once(again, 'close');
+  const reconnected = once(wss, 'connection');
+  const [retry] = await reconnected;
+  const retryFrames = [];
+  retry.on('message', raw => retryFrames.push(JSON.parse(raw.toString())));
+  await until(() => retryFrames.some(m => m.type === 'hello'));
+  await delay(30);
+  const retryHello = retryFrames.find(m => m.type === 'hello');
+  assert.equal(retryHello.askWarning, true);
+  assert.equal(retryHello.ask.requestId, frames[u].event.ask.requestId);
+  assert.equal(retryFrames.some(m => m.event?.type === 'rc_close'), false);
+});
+
+test('activation reset republishes a new local warning rather than clearing it', async t => {
+  const { pi, ctx, wss, until } = await attached(t, { piEvents: true });
+  pi.command('rc', 'close', ctx);
+  const connected = once(wss, 'connection');
+  pi.command('rc', '', ctx);
+  pi.events.emit('rpiv:ask-user:prompt', { toolCallId: '' });
+  const [ws] = await connected;
+  const frames = [];
+  ws.on('message', raw => frames.push(JSON.parse(raw.toString())));
+  await until(() => frames.some(m => m.event?.type === 'ask_update'));
+  const h = frames.findIndex(m => m.type === 'hello');
+  const c = frames.findIndex(m => m.event?.type === 'rc_close');
+  const u = frames.findIndex((m, i) => i > c && m.event?.type === 'ask_update');
+  assert.ok(h >= 0 && c > h && u > c);
+  assert.equal(frames[h].askWarning, true);
+  assert.equal(frames[u].event.askWarning, true);
 });

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, value::RawValue, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, OpenOptions},
     io::{self, Read, Write},
@@ -442,20 +442,87 @@ fn ask_question(v: &Value) -> Option<Value> {
     question["options"] = options.into();
     Some(question)
 }
+// Strict rpiv fields cannot be silently discarded as they affect the decision.
+fn rpiv_optional_text(v: &Value, key: &str, max: usize) -> Option<Option<String>> {
+    match v.get(key) {
+        None => Some(None),
+        Some(Value::String(s)) if s.is_empty() => Some(None),
+        Some(Value::String(s)) if s.encode_utf16().count() <= max => Some(Some(s.clone())),
+        _ => None,
+    }
+}
+fn rpiv_question(v: &Value) -> Option<Value> {
+    let mut q = ask_question(v)?;
+    q["multi"] = v.get("multi")?.as_bool()?.into();
+    for (key, max) in [("header", 256)] {
+        if let Some(text) = rpiv_optional_text(v, key, max)? {
+            q[key] = text.into();
+        }
+    }
+    if let Some(value) = v.get("recommended") {
+        let index = value
+            .as_u64()
+            .filter(|i| *i < q["options"].as_array().unwrap().len() as u64)?;
+        q["recommended"] = index.into();
+    }
+    for (source, target) in v["options"]
+        .as_array()?
+        .iter()
+        .zip(q["options"].as_array_mut()?)
+    {
+        if let Some(text) = rpiv_optional_text(source, "description", MAX_TEXT)? {
+            target["description"] = text.into();
+        }
+    }
+    Some(q)
+}
 // A browser can answer only what arrives intact, so one invalid question or option drops the whole ask.
 fn ask_value(v: &Value) -> Option<Value> {
+    let kind = match v.get("kind") {
+        None => "legacy",
+        Some(Value::String(kind)) if kind == "omp" || kind == "rpiv" || kind == "terminal_only" => {
+            kind
+        }
+        _ => return None,
+    };
+    if kind == "rpiv" && serde_json::to_vec(v).ok()?.len() > 65536 {
+        return None;
+    }
+    let request = valid_id(&v["requestId"])?;
+    if kind == "terminal_only" {
+        if v.get("questions").is_some() {
+            return None;
+        }
+        let reason = v["reason"]
+            .as_str()
+            .filter(|r| ["preview", "oversize", "malformed", "unsupported_host"].contains(r))?;
+        return Some(json!({"kind":kind,"requestId":request,"reason":reason}));
+    }
     let questions = v["questions"]
         .as_array()
         .filter(|questions| !questions.is_empty() && questions.len() <= MAX_ASK_QUESTIONS)?
         .iter()
-        .map(ask_question)
+        .map(|q| {
+            if kind == "rpiv" {
+                rpiv_question(q)
+            } else {
+                ask_question(q)
+            }
+        })
         .collect::<Option<Vec<_>>>()
         .filter(|questions| unique_by(questions, "id"))?;
-    Some(json!({"requestId": valid_id(&v["requestId"])?, "questions": questions}))
+    let mut ask = json!({"requestId": request, "questions": questions});
+    if kind != "legacy" {
+        ask["kind"] = kind.into();
+    }
+    Some(ask)
 }
 // Rebuilds a browser's answers from known fields; None unless they fit the pending ask exactly.
 fn ask_answer(ask: Option<&Value>, session: &str, v: &Value) -> Option<Value> {
     let ask = ask.filter(|ask| ask["requestId"] == v["requestId"])?;
+    if ask.get("kind").is_some_and(|kind| kind != "omp") {
+        return rpiv_answer(ask, session, v);
+    }
     let questions = ask["questions"].as_array()?;
     let given = v["answers"]
         .as_array()
@@ -498,6 +565,85 @@ fn ask_answer(ask: Option<&Value>, session: &str, v: &Value) -> Option<Value> {
     Some(
         json!({"type":"ask_answer","sessionId":session,"requestId":ask["requestId"],"answers":answers}),
     )
+}
+fn rpiv_bytes(v: &Value, key: &str) -> Option<Option<String>> {
+    match v.get(key) {
+        None => Some(None),
+        Some(Value::String(s)) if s.len() <= MAX_ASK_INPUT => Some(Some(s.clone())),
+        _ => None,
+    }
+}
+fn rpiv_answer(ask: &Value, session: &str, v: &Value) -> Option<Value> {
+    if ask["kind"] != "rpiv" || serde_json::to_vec(v).ok()?.len() > 65536 {
+        return None;
+    }
+    let ask = ask_value(ask)?;
+    let attempt = valid_id(&v["attemptId"])?;
+    if attempt == ask["requestId"].as_str()? {
+        return None;
+    }
+    let global = rpiv_bytes(v, "globalNote")?;
+    let cancel = match v.get("cancel") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        _ => return None,
+    };
+    let mut out = json!({"type":"ask_answer", "sessionId":session, "requestId":ask["requestId"], "attemptId":attempt});
+    if let Some(note) = global {
+        out["globalNote"] = note.into();
+    }
+    if cancel {
+        if let Some(answers) = v.get("answers") {
+            if !answers.as_array()?.is_empty() {
+                return None;
+            }
+        }
+        out["cancel"] = true.into();
+        if v.get("answers").is_some() {
+            out["answers"] = json!([]);
+        }
+        return Some(out);
+    }
+    let questions = ask["questions"].as_array()?;
+    let given = v["answers"]
+        .as_array()
+        .filter(|a| a.len() == questions.len())?;
+    let mut answers = Vec::with_capacity(given.len());
+    for answer in given {
+        let id = valid_id(&answer["id"])?;
+        if answers.iter().any(|a: &Value| a["id"] == id) {
+            return None;
+        }
+        let q = questions.iter().find(|q| q["id"] == id)?;
+        let selected = answer["selectedOptions"].as_array()?;
+        let options = q["options"].as_array()?;
+        if !selected.iter().enumerate().all(|(i, label)| {
+            options.iter().any(|o| o["label"] == *label) && !selected[..i].contains(label)
+        }) {
+            return None;
+        }
+        let custom = rpiv_bytes(answer, "customInput")?;
+        if custom.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return None;
+        }
+        let count = selected.len() + usize::from(custom.is_some());
+        if count == 0 || (q["multi"] == false && count != 1) {
+            return None;
+        }
+        let mut item = json!({"id":id,"selectedOptions":selected});
+        if let Some(text) = custom {
+            item["customInput"] = text.into();
+        }
+        if let Some(notes) = rpiv_bytes(answer, "notes")? {
+            item["notes"] = notes.into();
+        }
+        answers.push(item);
+    }
+    out["answers"] = answers.into();
+    if v.get("cancel").is_some() {
+        out["cancel"] = false.into();
+    }
+    Some(out)
 }
 fn thinking_level(v: &Value) -> Option<&str> {
     v.as_str().filter(|s| THINKING_LEVELS.contains(s))
@@ -607,6 +753,9 @@ struct Session {
     background: Vec<Value>,
     todos: Vec<Value>,
     ask: Option<Value>,
+    ask_warning: bool,
+    attempts: HashMap<String, (String, Sender)>,
+    seen_attempts: HashSet<String>,
     models: Vec<Value>,
     owner: Option<Uuid>,
     tx: Option<Sender>,
@@ -615,7 +764,7 @@ struct Session {
 impl Session {
     // A session with no agent has nobody to answer for, so it never exposes its ask.
     fn info(&self, process: &str) -> Value {
-        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"host":self.host,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking || self.ask.is_some()) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background,"todos":self.todos,"ask":self.tx.as_ref().and(self.ask.as_ref())})
+        json!({"processId":process,"sessionId":self.id,"connectionId":self.connection,"name":self.name,"cwd":self.cwd,"host":self.host,"branch":self.branch,"busy":self.busy,"busySince":self.busy_since,"waiting":(self.waiting || self.asking || self.ask.is_some()) && self.tx.is_some(),"online":self.tx.is_some(),"updatedAt":self.updated_at,"model":self.model,"thinkingLevel":self.thinking_level,"context":self.context,"queued":self.queued,"background":self.background,"todos":self.todos,"ask":self.tx.as_ref().and(self.ask.as_ref()),"askWarning":self.tx.is_some() && self.ask_warning})
     }
     fn stored(&self, process: &str) -> StoredMeta {
         StoredMeta {
@@ -891,6 +1040,9 @@ fn load_sessions(dir: &Path) -> HashMap<String, Session> {
                 background: Vec::new(),
                 todos: Vec::new(),
                 ask: None,
+                ask_warning: false,
+                attempts: HashMap::new(),
+                seen_attempts: HashSet::new(),
                 models: Vec::new(),
                 owner: None,
                 tx: None,
@@ -1023,6 +1175,14 @@ fn close_revoked_browsers(inner: &mut Inner) {
         }
         keep
     });
+    for session in inner.sessions.values_mut() {
+        session.attempts.retain(|_, (_, browser)| {
+            inner
+                .browsers
+                .values()
+                .any(|(_, tx)| tx.same_channel(browser))
+        });
+    }
 }
 struct App {
     settings: Settings,
@@ -1325,6 +1485,11 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
     {
         let mut inner = app.inner.lock().unwrap();
         inner.browsers.remove(&id);
+        for session in inner.sessions.values_mut() {
+            session
+                .attempts
+                .retain(|_, (_, browser)| !browser.same_channel(&tx));
+        }
         if let Some(p) = process {
             if let Some(s) = inner.sessions.get_mut(&p) {
                 if s.owner == Some(id) {
@@ -1334,6 +1499,7 @@ async fn socket_loop(socket: WebSocket, app: Arc<App>, agent: bool, cookie: Stri
                     s.queued.clear();
                     s.background.clear();
                     s.ask = None;
+                    s.attempts.clear();
                     publish(&inner);
                 }
             }
@@ -1439,6 +1605,25 @@ fn agent_message(
         let updated_at = old
             .filter(|previous| previous.id == s)
             .map_or(updated_at, |previous| updated_at.max(previous.updated_at));
+        let same_session = old.filter(|previous| previous.id == s);
+        let same_connection = same_session.filter(|previous| previous.owner == Some(id));
+        // Offline entries with the same session ID are the existing resume mechanism.
+        // All agent sockets share the server's authenticated agent-token scope.
+        let predecessors = inner.sessions.iter().filter(|(key, previous)| {
+            previous.id == s && (key.as_str() == p || previous.tx.is_none())
+        });
+        let mut seen_attempts = HashSet::new();
+        let mut previous_warning = false;
+        for (_, previous) in predecessors {
+            previous_warning |= previous.ask_warning;
+            for attempt in &previous.seen_attempts {
+                if seen_attempts.len() == 4096 {
+                    break;
+                }
+                seen_attempts.insert(attempt.clone());
+            }
+        }
+        let new_ask = ask_value(&v["ask"]);
         let session = Session {
             id: s.into(),
             connection,
@@ -1462,7 +1647,13 @@ fn agent_message(
             queued: queued_list(&v["queued"]),
             background: background_list(&v["background"]),
             todos: todo_list(&v["todos"]),
-            ask: ask_value(&v["ask"]),
+            ask: new_ask.clone(),
+            ask_warning: v["askWarning"].as_bool().unwrap_or(false) || previous_warning,
+            attempts: same_connection
+                .filter(|old| old.ask == new_ask)
+                .map(|old| old.attempts.clone())
+                .unwrap_or_default(),
+            seen_attempts,
             models: model_list(&v["models"]).unwrap_or_default(),
             owner: Some(id),
             tx: Some(tx.clone()),
@@ -1539,6 +1730,54 @@ fn agent_message(
                 broadcast(&inner, frame);
             }
         }
+        Some("event") if v["event"]["type"] == "rc_close" => {
+            session.ask = None;
+            session.ask_warning = false;
+            session.attempts.clear();
+            publish(&inner);
+            broadcast(
+                &inner,
+                json!({"type":"event","processId":p,"sessionId":s,"event":{"type":"ask_update","ask":null,"askWarning":false}}),
+            );
+        }
+        Some("event") if v["event"]["type"] == "ask_rejected" => {
+            let event = &v["event"];
+            if let (Some(request), Some(attempt), Some(code)) = (
+                valid_id(&event["requestId"]),
+                valid_id(&event["attemptId"]),
+                event["code"].as_str(),
+            ) {
+                if [
+                    "invalid_answer",
+                    "invalid_payload",
+                    "unsupported_host",
+                    "not_found",
+                    "busy",
+                ]
+                .contains(&code)
+                    && session
+                        .ask
+                        .as_ref()
+                        .is_some_and(|ask| ask["requestId"] == request)
+                    && session
+                        .attempts
+                        .get(attempt)
+                        .is_some_and(|(r, _)| r == request)
+                {
+                    let (_, browser) = session.attempts.remove(attempt).unwrap();
+                    if inner
+                        .browsers
+                        .values()
+                        .any(|(_, tx)| tx.same_channel(&browser))
+                    {
+                        send(
+                            &browser,
+                            json!({"type":"event","processId":p,"sessionId":s,"event":{"type":"ask_rejected","requestId":request,"attemptId":attempt,"code":code}}),
+                        );
+                    }
+                }
+            }
+        }
         Some("event")
             if v["event"].is_object()
                 && [
@@ -1579,7 +1818,11 @@ fn agent_message(
             let introduced_ask = if kind == "ask_update" {
                 let ask = ask_value(&v["event"]["ask"]);
                 let introduced = session.ask.is_none() && ask.is_some();
+                if session.ask != ask {
+                    session.attempts.clear();
+                }
                 session.ask = ask;
+                session.ask_warning |= v["event"]["askWarning"].as_bool().unwrap_or(false);
                 changed = true;
                 introduced
             } else {
@@ -1636,12 +1879,11 @@ fn agent_message(
                     json!({"type":"event","processId":p,"sessionId":s,"event":event}),
                 );
             } else if kind == "ask_update" {
-                if introduced_ask {
-                    broadcast(
-                        &inner,
-                        json!({"type":"event","processId":p,"sessionId":s,"event":{"type":"ask_update","ask":inner.sessions[p.as_str()].ask.as_ref().unwrap()}}),
-                    );
-                }
+                let current = &inner.sessions[p.as_str()];
+                broadcast(
+                    &inner,
+                    json!({"type":"event","processId":p,"sessionId":s,"event":{"type":"ask_update","ask":current.ask,"askWarning":current.ask_warning}}),
+                );
             } else if !["queue_update", "background_update", "todo_update"].contains(&kind) {
                 broadcast(
                     &inner,
@@ -1695,6 +1937,64 @@ fn browser_message(app: &App, tx: &Sender, v: &Value) {
             None => {}
         }
         return;
+    }
+    if v["type"] == "ask_answer" && valid_id(&v["attemptId"]).is_some() {
+        let request = valid_id(&v["requestId"]);
+        let sid = valid_id(&v["sessionId"]);
+        if let (Some(request), Some(sid)) = (request, sid) {
+            let attempt = valid_id(&v["attemptId"]).unwrap();
+            let reject = |code| {
+                send(
+                    tx,
+                    json!({"type":"event","processId":p,"sessionId":sid,"event":{"type":"ask_rejected","requestId":request,"attemptId":attempt,"code":code}}),
+                )
+            };
+            let Some(session) = inner.sessions.get_mut(p) else {
+                reject("not_found");
+                return;
+            };
+            if session.id != sid
+                || session.tx.is_none()
+                || session
+                    .ask
+                    .as_ref()
+                    .is_none_or(|ask| ask["requestId"] != request)
+            {
+                reject("not_found");
+                return;
+            }
+            if session
+                .ask
+                .as_ref()
+                .is_some_and(|ask| ask["kind"] == "terminal_only")
+            {
+                reject("invalid_payload");
+                return;
+            }
+            if session
+                .ask
+                .as_ref()
+                .is_some_and(|ask| ask["kind"] == "rpiv")
+            {
+                if session.seen_attempts.contains(attempt)
+                    || session.attempts.len() >= 32
+                    || session.seen_attempts.len() >= 4096
+                {
+                    reject("busy");
+                    return;
+                }
+                let Some(command) = ask_answer(session.ask.as_ref(), sid, v) else {
+                    reject("invalid_answer");
+                    return;
+                };
+                session.seen_attempts.insert(attempt.to_owned());
+                session
+                    .attempts
+                    .insert(attempt.to_owned(), (request.to_owned(), tx.clone()));
+                send(session.tx.as_ref().unwrap(), command);
+                return;
+            }
+        }
     }
     let Some(session) = inner.sessions.get(p) else {
         if v["type"] != "models" {

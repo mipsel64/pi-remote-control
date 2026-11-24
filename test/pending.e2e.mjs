@@ -37,6 +37,31 @@ async function waitGate(gate, signal) {
   } finally { signal?.removeEventListener('abort', onAbort); }
 }
 
+async function verifyChromiumSandbox(browser, t) {
+  const cdp = await browser.newBrowserCDPSession();
+  let page;
+  try {
+    const { arguments: args } = await cdp.send('Browser.getBrowserCommandLine');
+    assert.ok(args.length, 'sandbox evidence: browser process arguments unavailable');
+    const switches = args.filter(arg => arg.startsWith('--')).map(arg => arg.split('=')[0]);
+    t.diagnostic(`Chromium effective argument switches: ${switches.join(' ')}`);
+    assert.ok(!switches.some(arg => /^--(?:no-sandbox|disable-setuid-sandbox|disable-seccomp-filter-sandbox|disable-namespace-sandbox|disable-gpu-sandbox|disable-sandbox|single-process|no-zygote)$/.test(arg)),
+      'sandbox evidence: sandbox-disabling argument detected');
+    page = await browser.newPage();
+    await page.goto('chrome://sandbox', { timeout: 10_000 });
+    const status = await page.locator('body').innerText({ timeout: 10_000 });
+    t.diagnostic(`Chromium sandbox status: ${status.replace(/\s+/g, ' ').trim()}`);
+    assert.match(status, /Seccomp-BPF sandbox\s+Yes/i, 'sandbox evidence: seccomp-BPF not active');
+    assert.match(status, /(?:PID namespaces|SUID sandbox)\s+Yes/i, 'sandbox evidence: namespace or SUID sandbox not active');
+    assert.match(status, /You are adequately sandboxed/i, 'sandbox evidence: Chromium did not affirm sandboxing');
+  } catch (error) {
+    throw new Error(`Chromium sandbox evidence unavailable or inconclusive: ${error.message}`, { cause: error });
+  } finally {
+    await page?.close();
+    await cdp.detach();
+  }
+}
+
 // This provider never makes network requests. Pi still runs its actual agent loop,
 // tool execution, extension input handlers, native queues and session events.
 function controlledProvider() {
@@ -121,13 +146,26 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
   const notices = [];
   let editor = '';
   t.after(async () => {
-    if (session) { await session.abort(); await session.prompt('/rc close'); session.dispose(); }
-    await browser?.close();
-    if (relay && relay.exitCode === null && relay.signalCode === null) { relay.kill('SIGINT'); await once(relay, 'exit'); }
-    for (const [key, value] of Object.entries(previous)) {
-      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    const cleanupErrors = [];
+    const cleanup = async (label, action) => {
+      try { await action(); } catch (error) { cleanupErrors.push(new Error(label, { cause: error })); }
+    };
+    if (session) {
+      await cleanup('session abort', () => session.abort());
+      await cleanup('session close', () => session.prompt('/rc close'));
+      await cleanup('session dispose', () => session.dispose());
     }
-    await rm(dir, { recursive: true, force: true });
+    await cleanup('browser close', () => browser?.close());
+    await cleanup('relay shutdown', async () => {
+      if (relay && relay.exitCode === null && relay.signalCode === null) { relay.kill('SIGINT'); await once(relay, 'exit'); }
+    });
+    for (const [key, value] of Object.entries(previous)) {
+      await cleanup(`restore ${key}`, () => {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      });
+    }
+    await cleanup('remove temporary directory', () => rm(dir, { recursive: true, force: true }));
+    if (cleanupErrors.length) throw new AggregateError(cleanupErrors, 'E2E cleanup failed');
   });
   relay = spawn(path.resolve('server/target/debug/prc'), ['serve'], { env: { ...process.env,
     RC_CONFIG: config, XDG_STATE_HOME: path.join(dir, 'state'), RC_HOST: '127.0.0.1', RC_PORT: String(port),
@@ -169,7 +207,8 @@ test('browser → Rust relay → extension → real Pi native steering', { timeo
   await session.prompt('/rc');
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.deepEqual(errors, []);
-  browser = await chromium.launch();
+  browser = await chromium.launch({ chromiumSandbox: true, args: ['--enable-automation'] });
+  await verifyChromiumSandbox(browser, t);
   const page = await browser.newPage({ serviceWorkers: 'block', locale: 'en-US', timezoneId: 'Asia/Bangkok' });
   page.setDefaultTimeout(WAIT_TIMEOUT);
   t.after(async () => { if (!t.passed) t.diagnostic(JSON.stringify({ relayLog, errors, notices })); });
